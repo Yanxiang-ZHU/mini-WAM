@@ -1,8 +1,8 @@
 """CLI demo: run the cascade WAM closed-loop with a debug overlay.
 
 Usage:
-    python scripts/run_agent.py --world-model checkpoints/world_model_best.pt \
-        --action-expert checkpoints/action_expert_best.pt \
+    python scripts/run_agent.py --world-model checkpoints/world_model_goal_wide_best.pt \
+        --action-expert checkpoints/action_expert_goal_wide_best.pt \
         --instruction "Go to the hollow triangle." --out demo
 
 * The visual subgoal is generated asynchronously at low frequency (π0.7-style).

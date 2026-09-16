@@ -11,8 +11,8 @@ Reports:
 
 Usage:
     python evaluation/evaluate_action_expert.py \
-        --checkpoint checkpoints/action_expert_goal_best.pt \
-        [--world-model checkpoints/world_model_goal_ow_best.pt]
+        --checkpoint checkpoints/action_expert_goal_wide_best.pt \
+        [--world-model checkpoints/world_model_goal_wide_best.pt]
 """
 
 import argparse

@@ -80,15 +80,30 @@ class ActionExpert(nn.Module):
         return flow_matching_loss(v, v_star)
 
     @torch.no_grad()
-    def sample(self, history: torch.Tensor, subgoal: torch.Tensor,
+    def sample(self, history: torch.Tensor, subgoal: torch.Tensor | None,
                lang_ids: torch.Tensor, subtask_ids: torch.Tensor, meta_list: list,
                n_steps: int | None = None) -> torch.Tensor:
         n_steps = n_steps or self.denoise_steps
         B = history.shape[0]
-        a = torch.randn(B, self.action_horizon, self.num_actions, device=history.device)
+        H = self.action_horizon
+        # fixed encodings (independent of the denoising step) — computed once
+        hist_tokens = self.vision.encode_history(history)
+        subgoal_tokens = (self.vision.encode_frame(subgoal)
+                          if (self.use_subgoal and subgoal is not None) else None)
+        lang = self.lang(lang_ids)
+        subtask = self.subtask_enc(subtask_ids)
+        a = torch.randn(B, H, self.num_actions, device=history.device)
         dt = 1.0 / n_steps
         for i in range(n_steps):
             t = torch.full((B,), i / n_steps, device=history.device)
-            v = self.forward(a, t, history, subgoal, lang_ids, subtask_ids, meta_list)
+            a_tokens = self.action_embed(a) + self.action_pos[:, :H]   # depends on a
+            c = self.cond(lang, subtask, meta_list, t)                 # depends on t
+            if subgoal_tokens is not None:
+                xt = torch.cat([hist_tokens, subgoal_tokens, a_tokens], dim=1)
+            else:
+                xt = torch.cat([hist_tokens, a_tokens], dim=1)
+            for blk in self.blocks:
+                xt = blk(xt, c)
+            v = self.head(self.norm(xt[:, -H:]))
             a = a + v * dt
         return a  # (B, H, 4) continuous; argmax -> discrete

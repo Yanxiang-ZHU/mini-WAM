@@ -94,32 +94,26 @@ pip install -e .
 # 2. tests
 pytest
 
-# 3. generate the dataset (10k episodes)
-python scripts/generate_dataset.py --episodes 10000 --split train --output data/train
+# 3. generate the wide training data (20k episodes, 1-6 distractors, 1-3 obstacles)
+python scripts/generate_dataset.py --episodes 20000 --split train_wide --output data/train_wide --workers 8
 python scripts/generate_dataset.py --episodes 1000  --split val   --output data/val
 
 # 4. train the baseline
 python training/train_simple_policy.py --config configs/simple_policy.yaml
 
-# 5. train the world model
-python training/train_world_model.py --config configs/world_model.yaml
+# 5. train the world model (goal-state + object-weighted)
+python training/train_world_model.py --config configs/world_model_goal_wide.yaml
 
-# 6. train the action expert (with subgoal)
-python training/train_action_expert.py --config configs/action_expert.yaml
+# 6. train the action expert (Phase 6 + cosine LR)
+python training/train_action_expert.py --config configs/action_expert_goal_wide.yaml
 
-# 7. closed-loop evaluation
-python scripts/evaluate.py --model cascade \
-    --checkpoint checkpoints/action_expert_best.pt \
-    --world-model checkpoints/world_model_best.pt --episodes 200
+# 7. closed-loop evaluation (async cascade)
+python scripts/eval_cascade_full.py \
+    --world-model checkpoints/world_model_goal_wide_best.pt \
+    --action-expert checkpoints/action_expert_goal_wide_best.pt --episodes 200
 
-# 8. OOD benchmark
-python scripts/evaluate.py --model cascade --checkpoint checkpoints/action_expert_best.pt \
-    --world-model checkpoints/world_model_best.pt --ood
-
-# 9. interactive demo (saves overlay frames + GIF)
-python scripts/run_agent.py --world-model checkpoints/world_model_best.pt \
-    --action-expert checkpoints/action_expert_best.pt \
-    --instruction "Go to the hollow triangle."
+# 8. interactive demo (web UI)
+python scripts/web_demo.py --port 8000
 ```
 
 ---

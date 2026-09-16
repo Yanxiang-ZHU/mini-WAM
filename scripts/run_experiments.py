@@ -4,8 +4,8 @@ Produces ``results/results.json`` and a filled ``docs/report.md``.
 
 Usage:
     python scripts/run_experiments.py --simple checkpoints/simple_policy_best.pt \
-        --action-expert checkpoints/action_expert_best.pt \
-        --world-model checkpoints/world_model_best.pt \
+        --action-expert checkpoints/action_expert_goal_wide_best.pt \
+        --world-model checkpoints/world_model_goal_wide_best.pt \
         [--action-chunk checkpoints/action_chunk_policy_best.pt]
 """
 

@@ -5,8 +5,8 @@ Runs the main (test) split plus the five OOD splits and prints a summary table.
 
 Usage:
     python scripts/eval_cascade_full.py \
-        --world-model checkpoints/world_model_goal_ow_best.pt \
-        --action-expert checkpoints/action_expert_goal_v2_best.pt \
+        --world-model checkpoints/world_model_goal_wide_best.pt \
+        --action-expert checkpoints/action_expert_goal_wide_best.pt \
         --episodes 200
 """
 

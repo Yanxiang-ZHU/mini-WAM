@@ -1,8 +1,8 @@
 """Top-level closed-loop evaluation for any trained policy.
 
 Usage:
-    python scripts/evaluate.py --model cascade --checkpoint checkpoints/action_expert_best.pt \
-        --world-model checkpoints/world_model_best.pt --episodes 200
+    python scripts/evaluate.py --model cascade --checkpoint checkpoints/action_expert_goal_wide_best.pt \
+        --world-model checkpoints/world_model_goal_wide_best.pt --episodes 200
     python scripts/evaluate.py --model simple_policy --checkpoint checkpoints/simple_policy_best.pt --ood
 """
 

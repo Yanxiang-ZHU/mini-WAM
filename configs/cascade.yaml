@@ -34,11 +34,12 @@ training:
   learning_rate: 0.0001
 
 inference:
-  synchronous: true
+  synchronous: false
   subtask_mode: oracle
+  subgoal_update_every: 5
 
 checkpoint:
   dir: checkpoints
   name: cascade_wam
-  world_model_path: checkpoints/world_model_best.pt
-  action_expert_path: checkpoints/action_expert_best.pt
+  world_model_path: checkpoints/world_model_goal_wide_best.pt
+  action_expert_path: checkpoints/action_expert_goal_wide_best.pt

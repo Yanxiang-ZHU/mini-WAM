@@ -115,22 +115,11 @@ times on the RTX 5060 Ti:
 .venv/Scripts/python.exe scripts/evaluate.py --model action_expert \
     --checkpoint checkpoints/action_chunk_policy_best.pt --episodes 200
 
-# cascade WAM (world model + action expert)
-.venv/Scripts/python.exe scripts/evaluate.py --model cascade \
-    --checkpoint checkpoints/action_expert_best.pt \
-    --world-model checkpoints/world_model_best.pt --episodes 200
-```
-
-Run the full suite (main + OOD benchmark) in one shot:
-
-```bash
-.venv/Scripts/python.exe scripts/run_experiments.py \
-    --simple checkpoints/simple_policy_best.pt \
-    --action-expert checkpoints/action_expert_best.pt \
-    --action-chunk checkpoints/action_chunk_policy_best.pt \
-    --world-model checkpoints/world_model_best.pt \
-    --episodes 200
-#   -> writes results/results.json and results/report.md
+# cascade WAM — full main + OOD benchmark (async, π0.7-style)
+.venv/Scripts/python.exe scripts/eval_cascade_full.py \
+    --world-model checkpoints/world_model_goal_wide_best.pt \
+    --action-expert checkpoints/action_expert_goal_wide_best.pt --episodes 200
+#   -> prints success per split (test + 5 OOD splits)
 ```
 
 ---
@@ -139,8 +128,8 @@ Run the full suite (main + OOD benchmark) in one shot:
 
 ```bash
 .venv/Scripts/python.exe scripts/sample_subgoal.py \
-    --checkpoint checkpoints/world_model_best.pt --n 8 --out _subgoals
-#   -> _subgoals/subgoal_XX.png (history → generated → real)
+    --checkpoint checkpoints/world_model_goal_wide_best.pt --goal --n 8 --out _subgoals
+#   -> _subgoals/subgoal_XX.png (history → generated goal → real terminal frame)
 ```
 
 ---
@@ -154,9 +143,8 @@ latest available subgoal and never blocks.
 
 ```bash
 # CLI demo — random scene (omit --seed), manual instruction, N frames + GIF
+# (defaults to the wide models; no explicit checkpoint flags needed)
 .venv/Scripts/python.exe scripts/run_agent.py \
-    --world-model checkpoints/world_model_best.pt \
-    --action-expert checkpoints/action_expert_best.pt \
     --instruction "Go to the hollow triangle." \
     --out demo
 #   -> demo/step_XXX.png + demo/demo.gif
@@ -172,10 +160,7 @@ Run, and watch the agent navigate (observation + async subgoal + action chunk
 streamed live over WebSocket). Each run is a fresh random scene.
 
 ```bash
-.venv/Scripts/python.exe scripts/web_demo.py \
-    --world-model checkpoints/world_model_best.pt \
-    --action-expert checkpoints/action_expert_best.pt \
-    --port 8000
+.venv/Scripts/python.exe scripts/web_demo.py --port 8000
 #   -> open http://localhost:8000
 ```
 

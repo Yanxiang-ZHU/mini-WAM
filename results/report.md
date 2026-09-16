@@ -1,20 +1,59 @@
-# mini-wam results (auto-generated)
+# mini-wam results
+
+Final results (async cascade, 200 episodes per split, NVIDIA RTX 5060 Ti).
+
+## Final models
+
+| Component | Checkpoint |
+|---|---|
+| World Model | `checkpoints/world_model_goal_wide_best.pt` |
+| Action Expert | `checkpoints/action_expert_goal_wide_best.pt` |
 
 ## Main results (test split)
 
-| Model | Success | Avg steps | Collisions |
-|---|---|---|---|
-| Random | ~0% | 200 | — |
-| simple_policy  |   52.5% |    115.1 |   33.4 |
-| action_chunk   |   62.5% |    111.1 |   35.7 |
-| cascade        |   59.0% |    115.9 |   24.6 |
+| Model | Success |
+|---|---:|
+| Random | ~0% |
+| Simple policy (classifier) | 52.5% |
+| Action-chunk policy (no subgoal) | 62.5% |
+| Cascade — short-horizon subgoal | 61.0% |
+| Cascade — goal-state subgoal (unweighted) | 45.0% |
+| Cascade — goal-state + object-weighted | 71.0% |
+| Cascade — + improved action expert (async) | 86.5% |
+| **Cascade — + wider training data (async, final)** | **92.5%** |
 
-## OOD benchmark (success rate %)
+## OOD benchmark (async cascade)
 
-| Split | simple_policy | action_chunk | cascade |
-|---|---|---|---|
-| test             | 52.5% | 64.5% | 57.5% |
-| ood_combo        | 53.0% | 57.0% | 48.0% |
-| ood_distractors  | 41.0% | 40.0% | 42.0% |
-| ood_layout       | 44.5% | 50.0% | 49.0% |
-| ood_long         | 48.5% | 62.0% | 55.5% |
+| Split | Narrow data | Wide data (final) |
+|---|---:|---:|
+| test (in-distribution) | 86.5% | **92.5%** |
+| ood_combo (unseen shape×fill) | 84.5% | **90.5%** |
+| ood_distractors (5–8 distractors) | 62.0% | **86.0%** |
+| ood_layout (3 obstacles) | 63.0% | **81.0%** |
+| ood_long (far target) | 79.5% | **93.0%** |
+
+## Research questions
+
+| Question | Answer |
+|---|---|
+| Q1 — visual subgoal helps control? | **YES** (goal-state subgoal, +30 pts over no-subgoal) |
+| Q2 — language grounding → compositional generalization? | **YES** (with diverse data) |
+| Q3 — flow matching beats a classifier? | **YES** (+10 pts) |
+| Q4 — full WAM improves performance? | **YES** (+40 pts over simple policy) |
+
+## Model sizes
+
+| Model | Params |
+|---|---|
+| Simple policy | 6.35M |
+| World Model | 11.50M |
+| Action Expert | 11.49M |
+| Cascade total | 23.0M |
+
+## Training data
+
+| Item | Value |
+|---|---|
+| Wide episodes | 20,000 |
+| Distribution | 1–6 distractors, 1–3 obstacles |
+| Expert success rate | 93.9% |

@@ -2,7 +2,7 @@
 comparisons with the real future frame (for visual inspection).
 
 Usage:
-    python scripts/sample_subgoal.py --checkpoint checkpoints/world_model_best.pt --n 8 --out _subgoals
+    python scripts/sample_subgoal.py --checkpoint checkpoints/world_model_goal_wide_best.pt --goal --n 8 --out _subgoals
 """
 
 import argparse

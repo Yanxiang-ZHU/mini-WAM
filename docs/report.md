@@ -160,15 +160,20 @@ rendered* — both of which require getting the training objective right.
 pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 pip install -e .
 pytest
-python scripts/generate_dataset.py --episodes 10000 --split train --output data/train
-python training/train_simple_policy.py --config configs/simple_policy.yaml
-python training/train_world_model.py --config configs/world_model.yaml
-python training/train_action_expert.py --config configs/action_expert.yaml
-python scripts/run_experiments.py --simple checkpoints/simple_policy_best.pt \
-    --action-expert checkpoints/action_expert_best.pt \
-    --action-chunk checkpoints/action_chunk_policy_best.pt \
-    --world-model checkpoints/world_model_best.pt
-python scripts/run_agent.py --world-model checkpoints/world_model_best.pt \
-    --action-expert checkpoints/action_expert_best.pt \
+
+# generate the wide training data (20k episodes, 1-6 distractors, 1-3 obstacles)
+python scripts/generate_dataset.py --episodes 20000 --split train_wide --output data/train_wide --workers 8
+
+# train the best models (goal-state subgoal + object-weighted WM, then AE with Phase 6)
+python training/train_world_model.py --config configs/world_model_goal_wide.yaml
+python training/train_action_expert.py --config configs/action_expert_goal_wide.yaml
+
+# evaluate the cascade (async, π0.7-style)
+python scripts/eval_cascade_full.py \
+    --world-model checkpoints/world_model_goal_wide_best.pt \
+    --action-expert checkpoints/action_expert_goal_wide_best.pt --episodes 200
+
+# interactive demo
+python scripts/run_agent.py \
     --instruction "Go to the hollow triangle."
 ```

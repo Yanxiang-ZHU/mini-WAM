@@ -93,10 +93,20 @@ class WorldModel(nn.Module):
                n_steps: int | None = None) -> torch.Tensor:
         n_steps = n_steps or self.denoise_steps
         B = history.shape[0]
+        # fixed encodings (independent of the denoising step) — computed once
+        hist_tokens = self.vision.encode_history(history)
+        lang = self.lang(lang_ids)
+        subtask = self.subtask_enc(subtask_ids)
         x = torch.randn(B, 1, self.height, self.width, device=history.device)
         dt = 1.0 / n_steps
         for i in range(n_steps):
             t = torch.full((B,), i / n_steps, device=history.device)
-            v = self.forward(x, t, history, lang_ids, subtask_ids, meta_list)
-            x = x + v * dt
+            img_tokens = self.vision.encode_frame(x)          # depends on x
+            c = self.cond(lang, subtask, meta_list, t)        # depends on t
+            xt = torch.cat([hist_tokens, img_tokens], dim=1)
+            for blk in self.blocks:
+                xt = blk(xt, c)
+            v = self.norm(xt[:, -self.n_patches:])
+            v = self.head(v)
+            x = x + unpatchify(v, self.patch, self.height, self.width) * dt
         return x
