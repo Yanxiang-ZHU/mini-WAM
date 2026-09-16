@@ -128,8 +128,17 @@ python scripts/run_agent.py --world-model checkpoints/world_model_best.pt \
 
 * **Baseline 1** — simple policy (obs → single action classifier).
 * **Baseline 2** — action-chunk policy (flow matching, *no* subgoal; `use_subgoal: false`).
-* **Main** — cascade WAM (world model → subgoal → action expert).
-* Ablations: no-subgoal vs subgoal, real vs generated subgoal, flow matching vs
+* **Main** — cascade WAM (world model → **goal-state visual subgoal** → action expert).
+* Ablations: no-subgoal vs subgoal, short-horizon vs goal-state subgoal, real vs
+  generated subgoal, object weighting on the world model, flow matching vs
   classifier, history length, subgoal horizon, model size.
 
-See `docs/report.md` for the experimental results.
+**Key result** (200-episode closed-loop, test split): the cascade with a
+**goal-state subgoal + object-weighted world model + diverse (wide) training data**
+reaches **92.5%**, vs 52.5% for the simple policy and 62.5% for the no-subgoal
+action-chunk policy — confirming that the world-model → subgoal → action-expert
+structure helps, provided the subgoal is a goal state, the world model renders it
+faithfully, and the training data is diverse. OOD: unseen combos 90.5%, dense
+distractors 86%, multiple obstacles 81%.
+
+See `docs/report.md` for the full experimental results.

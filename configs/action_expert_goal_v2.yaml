@@ -1,0 +1,46 @@
+# Action Expert v2 — goal-state subgoal + Phase 6 (generated-subgoal mix) + cosine LR.
+seed: 42
+device: cuda
+
+image:
+  width: 48
+  height: 48
+  channels: 1
+
+history:
+  frames: 4
+
+action:
+  horizon: 8
+  execute_steps: 2
+  num_actions: 4
+
+model:
+  hidden_dim: 256
+  layers: 6
+  heads: 8
+  patch: 8
+  lang_layers: 2
+  lang_heads: 4
+  denoise_steps: 4
+  use_subgoal: true
+
+training:
+  data: data/train
+  val_data: data/val
+  batch_size: 128
+  epochs: 20
+  learning_rate: 0.0002
+  weight_decay: 0.0
+  workers: 4
+  deltas: [8, 16, 24, 32]
+  goal: true
+  generated_ratio: 0.25
+  max_episodes: null
+  save_every: 1
+  mixed_precision: true
+
+checkpoint:
+  dir: checkpoints
+  name: action_expert_goal_v2
+  world_model_path: checkpoints/world_model_goal_ow_best.pt

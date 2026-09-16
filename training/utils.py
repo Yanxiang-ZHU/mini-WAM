@@ -21,9 +21,10 @@ def load_config(path: str) -> dict:
 
 def make_loader(data_dir: str, batch_size: int, *, K: int = 4, H: int = 8,
                 deltas=(8, 16, 24, 32), workers: int = 4, shuffle: bool = True,
-                max_episodes: int | None = None, preload: bool = True) -> DataLoader:
+                max_episodes: int | None = None, preload: bool = True,
+                goal: bool = False) -> DataLoader:
     ds = EpisodeDataset(data_dir, K=K, H=H, deltas=tuple(deltas),
-                        max_episodes=max_episodes, preload=preload)
+                        max_episodes=max_episodes, preload=preload, goal=goal)
     # preloaded datasets live in the parent process; avoid pickling them to
     # workers by using a single process (in-memory access is fast enough).
     n_workers = 0 if preload else workers

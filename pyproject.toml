@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 human = ["pygame"]
+web = ["fastapi", "uvicorn[standard]"]
 dev = ["pytest"]
 
 [tool.setuptools]

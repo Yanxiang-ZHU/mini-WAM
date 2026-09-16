@@ -22,10 +22,11 @@ def main():
     ap.add_argument("--n", type=int, default=8)
     ap.add_argument("--out", default="_subgoals")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--goal", action="store_true", help="use goal-state subgoals (terminal frame)")
     args = ap.parse_args()
 
     wm, _ = build_world_model(args.checkpoint, args.device)
-    ds = EpisodeDataset(args.data, preload=True)
+    ds = EpisodeDataset(args.data, preload=True, goal=args.goal)
     rng = np.random.default_rng(0)
     idxs = rng.choice(len(ds), size=min(args.n, len(ds)), replace=False)
 

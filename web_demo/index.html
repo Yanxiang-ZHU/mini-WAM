@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-wam · Live Demo</title>
+<style>
+  :root {
+    --bg:#0f1216; --panel:#171b22; --ink:#e6ebf3; --muted:#8b94a3;
+    --accent:#3b6ef5; --accent2:#16a085; --border:#262c36; --bad:#ef4444;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { padding:18px 26px; border-bottom:1px solid var(--border); display:flex;
+           align-items:baseline; gap:14px; }
+  header h1 { margin:0; font-size:19px; letter-spacing:-0.3px; }
+  header .sub { color:var(--muted); font-size:13px; }
+  .wrap { display:grid; grid-template-columns: 1fr 380px; min-height:calc(100vh - 58px); }
+  .stage { padding:26px; display:flex; flex-direction:column; align-items:center; gap:20px; }
+  .frames { display:flex; gap:26px; align-items:flex-start; flex-wrap:wrap; justify-content:center; }
+  .frame-box { text-align:center; }
+  .frame-box .label { font-size:12px; color:var(--muted); margin-bottom:8px; letter-spacing:0.3px; }
+  canvas.px { image-rendering:pixelated; border:1px solid var(--border); border-radius:6px;
+              background:#000; }
+  .side { border-left:1px solid var(--border); background:var(--panel); padding:26px 22px;
+          display:flex; flex-direction:column; gap:18px; }
+  .side h2 { font-size:13px; margin:0; color:var(--muted); text-transform:uppercase;
+             letter-spacing:0.6px; }
+  textarea { width:100%; height:64px; background:#0b0e12; color:var(--ink); border:1px solid
+             var(--border); border-radius:8px; padding:12px; font-size:15px; resize:vertical;
+             font-family:inherit; }
+  textarea:focus { outline:none; border-color:var(--accent); }
+  .btn-row { display:flex; gap:10px; }
+  button { padding:12px; border-radius:8px; border:none; font-size:14px; font-weight:600;
+           cursor:pointer; transition:0.15s; }
+  .btn-run { flex:1; background:var(--accent); color:#fff; }
+  .btn-run:hover { filter:brightness(1.1); }
+  .btn-run:disabled { background:#3a4350; cursor:not-allowed; }
+  .btn-new { background:#2a3140; color:var(--ink); }
+  .btn-new:hover { background:#343d4e; }
+  .speed-row { display:flex; align-items:center; gap:12px; }
+  .speed-row .lbl { color:var(--muted); font-size:12.5px; flex:0 0 auto; }
+  .speed-row input[type=range] { flex:1; accent-color:var(--accent); }
+  .speed-row .val { color:var(--ink); font-size:12.5px; font-family:"SF Mono",ui-monospace,monospace; flex:0 0 auto; width:52px; text-align:right; }
+  .speed-tags { display:flex; gap:6px; margin-top:6px; }
+  .speed-tags button { flex:0 0 auto; font-size:11px; padding:3px 9px; background:#222936; color:#aeb6c2; border-radius:12px; }
+  .speed-tags button:hover { background:#2c3547; color:#fff; }
+  .objects { display:flex; flex-wrap:wrap; gap:7px; }
+  .obj-chip { background:#222936; color:#cbd5e1; border:1px solid var(--border); border-radius:16px;
+              padding:6px 12px; font-size:12.5px; cursor:pointer; }
+  .obj-chip:hover { border-color:var(--accent); color:#fff; }
+  .obj-chip .at { color:#6b7686; font-size:11px; margin-left:4px; }
+  .status { display:flex; flex-direction:column; gap:8px; font-size:13.5px; }
+  .status .row { display:flex; justify-content:space-between; gap:10px; }
+  .status .k { color:var(--muted); }
+  .status .v { text-align:right; font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; }
+  .chunk { font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; letter-spacing:3px;
+           font-size:15px; }
+  .result { font-size:16px; font-weight:700; padding:10px 14px; border-radius:8px; text-align:center;
+            display:none; }
+  .result.ok { background:#123a2f; color:#4ade80; }
+  .result.fail { background:#3a1216; color:#f87171; }
+  .error { background:#3a1216; color:#f87171; padding:10px 14px; border-radius:8px; font-size:13px;
+           display:none; }
+  .hint { font-size:12px; color:var(--muted); line-height:1.5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mini-wam</h1>
+  <span class="sub">compute-scaled π0.7-style WAM · live closed-loop demo</span>
+</header>
+<div class="wrap">
+  <div class="stage">
+    <div class="frames">
+      <div class="frame-box">
+        <div class="label" id="obsLabel">SCENE (generated)</div>
+        <canvas id="obs" class="px" width="432" height="432"></canvas>
+      </div>
+      <div class="frame-box">
+        <div class="label">PREDICTED SUBGOAL (async, low-freq)</div>
+        <canvas id="subgoal" class="px" width="432" height="432"></canvas>
+      </div>
+    </div>
+    <div id="result" class="result"></div>
+  </div>
+
+  <div class="side">
+    <h2>1 · Scene</h2>
+    <button id="newScene" class="btn-new" onclick="newScene()">🎲 Generate a new scene</button>
+    <div class="hint">A random scene is generated first so you can see what's in it. Click an
+    object below to fill the instruction, or type your own.</div>
+    <div class="objects" id="objects"></div>
+
+    <h2>2 · Instruction</h2>
+    <textarea id="instr" placeholder='e.g. "Go to the hollow triangle."'></textarea>
+    <div class="btn-row">
+      <button id="run" class="btn-run" onclick="run()">Run</button>
+    </div>
+    <div class="speed-row">
+      <span class="lbl">Speed</span>
+      <input type="range" id="speed" min="0" max="500" step="10" value="200"
+             oninput="document.getElementById('speedVal').textContent = this.value + 'ms'">
+      <span id="speedVal" class="val">200ms</span>
+    </div>
+    <div class="speed-tags">
+      <button onclick="setSpeed(0)">1× (fast)</button>
+      <button onclick="setSpeed(150)">5×</button>
+      <button onclick="setSpeed(200)">8×</button>
+      <button onclick="setSpeed(300)">10×</button>
+    </div>
+    <div class="error" id="error"></div>
+
+    <h2>3 · Status</h2>
+    <div class="status">
+      <div class="row"><span class="k">Subtask</span><span id="st_subtask" class="v">—</span></div>
+      <div class="row"><span class="k">Predicted chunk</span><span id="st_chunk" class="v chunk">—</span></div>
+      <div class="row"><span class="k">Executed</span><span id="st_exec" class="v chunk">—</span></div>
+      <div class="row"><span class="k">Step</span><span id="st_step" class="v">—</span></div>
+    </div>
+    <div class="hint">
+      The subgoal is generated by the world model <b>asynchronously at low frequency</b>
+      (π0.7-style): it stays fixed for several steps, then jumps. The action expert keeps
+      using the latest available subgoal and never blocks.
+    </div>
+  </div>
+</div>
+
+<script>
+let ws = null;
+let running = false;
+let sceneObjects = [];
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => { newScene(); };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'scene') handleScene(m);
+    else if (m.type === 'frame') handleFrame(m);
+    else if (m.type === 'done') handleDone(m);
+    else if (m.type === 'error') handleError(m);
+  };
+  ws.onclose = () => { running = false; setRunEnabled(true); };
+  ws.onerror = () => { setRunEnabled(true); };
+}
+
+function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+
+function newScene() {
+  clearStatus();
+  document.getElementById('result').style.display = 'none';
+  hideError();
+  send({ type: 'new_scene' });
+}
+
+function setRunEnabled(on) {
+  document.getElementById('run').disabled = !on || running;
+  document.getElementById('newScene').disabled = running;
+}
+
+function clearStatus() {
+  document.getElementById('st_subtask').textContent = '—';
+  document.getElementById('st_chunk').textContent = '—';
+  document.getElementById('st_exec').textContent = '—';
+  document.getElementById('st_step').textContent = '—';
+}
+
+function showError(msg) { const e = document.getElementById('error'); e.textContent = msg; e.style.display = 'block'; }
+function hideError() { document.getElementById('error').style.display = 'none'; }
+
+function setSpeed(ms) {
+  document.getElementById('speed').value = ms;
+  document.getElementById('speedVal').textContent = ms + 'ms';
+}
+
+function run() {
+  const instr = document.getElementById('instr').value.trim();
+  if (!instr) { showError('Please type an instruction first (or click an object above).'); return; }
+  running = true;
+  setRunEnabled(false);
+  hideError();
+  document.getElementById('result').style.display = 'none';
+  document.getElementById('obsLabel').textContent = 'LIVE OBSERVATION';
+  const delay_ms = parseInt(document.getElementById('speed').value, 10) || 0;
+  send({ type: 'run', instruction: instr, delay_ms: delay_ms });
+}
+
+function handleScene(m) {
+  document.getElementById('obsLabel').textContent = 'SCENE (generated)';
+  decodeDraw(m.obs, document.getElementById('obs'));
+  // blank the subgoal canvas
+  const sg = document.getElementById('subgoal');
+  sg.getContext('2d').clearRect(0, 0, sg.width, sg.height);
+  sceneObjects = m.objects;
+  const box = document.getElementById('objects');
+  box.innerHTML = '';
+  m.objects.forEach((o) => {
+    const chip = document.createElement('button');
+    chip.className = 'obj-chip';
+    chip.textContent = o.fill + ' ' + o.shape;
+    const at = document.createElement('span');
+    at.className = 'at';
+    at.textContent = '(' + o.x + ',' + o.y + ')';
+    chip.appendChild(at);
+    chip.onclick = () => {
+      document.getElementById('instr').value = 'Go to the ' + o.fill + ' ' + o.shape + '.';
+    };
+    box.appendChild(chip);
+  });
+}
+
+function decodeDraw(b64, canvas) {
+  const bytes = atob(b64);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  const side = 48;
+  const img = new ImageData(side, side);
+  for (let i = 0; i < side * side; i++) {
+    const v = arr[i];
+    const o = i * 4;
+    img.data[o] = v; img.data[o+1] = v; img.data[o+2] = v; img.data[o+3] = 255;
+  }
+  const off = document.createElement('canvas');
+  off.width = side; off.height = side;
+  off.getContext('2d').putImageData(img, 0, 0);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+}
+
+function handleFrame(m) {
+  decodeDraw(m.obs, document.getElementById('obs'));
+  decodeDraw(m.subgoal, document.getElementById('subgoal'));
+  document.getElementById('st_subtask').textContent = m.subtask;
+  document.getElementById('st_chunk').textContent = m.chunk.join(' ');
+  document.getElementById('st_exec').textContent = m.exec.join(' ');
+  document.getElementById('st_step').textContent = m.step;
+}
+
+function handleDone(m) {
+  running = false;
+  setRunEnabled(true);
+  document.getElementById('obsLabel').textContent = 'SCENE (generated)';
+  const r = document.getElementById('result');
+  r.style.display = 'block';
+  if (m.success) { r.className = 'result ok'; r.textContent = '✓ SUCCESS — reached target in ' + m.steps + ' steps'; }
+  else { r.className = 'result fail'; r.textContent = '✗ failed after ' + m.steps + ' steps'; }
+}
+
+function handleError(m) {
+  running = false;
+  setRunEnabled(true);
+  showError(m.message);
+}
+
+connect();
+</script>
+</body>
+</html>

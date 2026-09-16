@@ -40,6 +40,9 @@ class WorldModel(nn.Module):
         height = cfg.get("height", 48)
         width = cfg.get("width", 48)
         self.denoise_steps = cfg.get("denoise_steps", 4)
+        # object-weighted loss: up-weight object/player pixels (in the target
+        # frame) so the flow-matching loss is not dominated by the background.
+        self.obj_weight = cfg.get("obj_weight", 1.0)
 
         self.vision = VisionEncoder(patch, dim, history, height, width)
         self.lang = LanguageEncoder(dim, cfg.get("lang_layers", 2), cfg.get("lang_heads", 4))
@@ -77,6 +80,11 @@ class WorldModel(nn.Module):
         t = torch.rand(B, device=subgoal.device)
         x_t, v_star = interpolate(subgoal, t)
         v = self.forward(x_t, t, history, lang_ids, subtask_ids, meta_list)
+        if self.obj_weight > 1.0:
+            # object/player pixels (value > 0 in [-1,1] target) get up-weighted
+            obj_mask = (subgoal > 0.0).float()
+            weight = 1.0 + (self.obj_weight - 1.0) * obj_mask
+            return (weight * (v - v_star) ** 2).mean()
         return flow_matching_loss(v, v_star)
 
     @torch.no_grad()

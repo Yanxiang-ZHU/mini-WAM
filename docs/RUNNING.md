@@ -77,9 +77,20 @@ times on the RTX 5060 Ti:
 | Model | Command | ≈ time |
 |---|---|---|
 | Simple policy | `python training/train_simple_policy.py --config configs/simple_policy.yaml` | ~20 min |
-| World Model | `python training/train_world_model.py --config configs/world_model.yaml` | ~40 min |
-| Action Expert | `python training/train_action_expert.py --config configs/action_expert.yaml` | ~35 min |
+| World Model (wide) | `python training/train_world_model.py --config configs/world_model_goal_wide.yaml` | ~70 min |
+| Action Expert (wide) | `python training/train_action_expert.py --config configs/action_expert_goal_wide.yaml` | ~2 h |
 | Action-chunk (no subgoal) | `python training/train_action_expert.py --config configs/action_chunk_policy.yaml` | ~25 min |
+
+> **Recommended (best results)**: the wide-data configs (`world_model_goal_wide.yaml`
+> and `action_expert_goal_wide.yaml`) train on 20k episodes with a **wide
+> distribution** (1–6 distractors, 1–3 obstacles), using a **goal-state subgoal** +
+> **object-weighted loss** + **Phase 6** (generated-subgoal mix). This gives
+> **92.5%** closed-loop success (and 86–93% across OOD splits) — the strongest
+> result. First generate the wide data:
+>
+> ```bash
+> python scripts/generate_dataset.py --episodes 20000 --split train_wide --output data/train_wide --workers 8
+> ```
 
 ```bash
 .venv/Scripts/python.exe training/train_simple_policy.py --config configs/simple_policy.yaml
@@ -136,30 +147,49 @@ Run the full suite (main + OOD benchmark) in one shot:
 
 ## 7. Run the interactive demo
 
+The demo now generates the visual subgoal **asynchronously at low frequency**
+(π0.7-style): the world model refreshes the subgoal every `--subgoal-update-every`
+steps (default 5) in a background thread, while the action expert keeps using the
+latest available subgoal and never blocks.
+
 ```bash
+# CLI demo — random scene (omit --seed), manual instruction, N frames + GIF
 .venv/Scripts/python.exe scripts/run_agent.py \
     --world-model checkpoints/world_model_best.pt \
     --action-expert checkpoints/action_expert_best.pt \
     --instruction "Go to the hollow triangle." \
     --out demo
-#   -> demo/step_XXX.png + demo/demo.gif (debug overlay: obs / subgoal / actions)
+#   -> demo/step_XXX.png + demo/demo.gif
+
+# omit --instruction to type it interactively; omit --seed for a random layout
+.venv/Scripts/python.exe scripts/run_agent.py --out demo2
 ```
 
-Change `--instruction` to any of the six categories (e.g. `"Reach the solid
-square."`), or add `--seed N` for a different scene layout.
+## 8. Web demo (browser UI)
 
----
+A live browser demo: image on the left, instruction text box on the right, press
+Run, and watch the agent navigate (observation + async subgoal + action chunk
+streamed live over WebSocket). Each run is a fresh random scene.
 
-## 8. Human control (optional)
+```bash
+.venv/Scripts/python.exe scripts/web_demo.py \
+    --world-model checkpoints/world_model_best.pt \
+    --action-expert checkpoints/action_expert_best.pt \
+    --port 8000
+#   -> open http://localhost:8000
+```
+
+The web UI has preset example buttons and a 🎲 random-scene button. The subgoal
+panel stays fixed for several steps (low-frequency async update), then jumps.
+
+## 9. Human control (optional)
 
 ```bash
 uv pip install --python .venv/Scripts/python.exe pygame
 .venv/Scripts/python.exe -m game.keyboard   # WASD to move, ESC to quit
 ```
 
----
-
-## 9. View the report
+## 10. View the report
 
 Open `project_report.html` in a browser (it references the generated images and
 the demo GIF relative to the project folder), or read `docs/report.md` and

@@ -29,11 +29,22 @@ def normalize_frames(u8: np.ndarray, lo: float = -1.0, hi: float = 1.0) -> np.nd
     return x * (hi - lo) + lo
 
 
-def extract_sample(frames_u8, actions_u8, t, delta, K, H, lo=-1.0, hi=1.0):
-    """Extract a single sample at timestep ``t`` from a full episode."""
+def extract_sample(frames_u8, actions_u8, t, delta, K, H, lo=-1.0, hi=1.0, goal=False):
+    """Extract a single sample at timestep ``t`` from a full episode.
+
+    ``goal=True`` uses the terminal frame (player at/near the target) as the
+    visual subgoal — a goal-state conditioning à la π0 image goals — instead of a
+    short-horizon future frame (``frame[t+delta]``).
+    """
     T = frames_u8.shape[0]
     history = normalize_frames(frames_u8[t - K + 1:t + 1], lo, hi)          # (K,48,48)
-    subgoal = normalize_frames(frames_u8[t + delta:t + delta + 1], lo, hi)  # (1,48,48)
+    if goal:
+        sg_idx = T - 1                       # terminal frame = goal state
+        subgoal_delta = T - 1 - t            # steps remaining to the goal
+    else:
+        sg_idx = t + delta
+        subgoal_delta = delta
+    subgoal = normalize_frames(frames_u8[sg_idx:sg_idx + 1], lo, hi)        # (1,48,48)
     chunk = actions_u8[t:t + H]                                             # (H,)
     # one-hot action chunk (H, 4)
     onehot = np.zeros((H, 4), dtype=np.float32)
@@ -41,7 +52,7 @@ def extract_sample(frames_u8, actions_u8, t, delta, K, H, lo=-1.0, hi=1.0):
     return {
         "history": history,           # (K,48,48) float
         "subgoal": subgoal[0],        # (48,48) float
-        "subgoal_delta": delta,
+        "subgoal_delta": subgoal_delta,
         "action_chunk": chunk,        # (H,) int
         "action_onehot": onehot,      # (H,4) float
     }
@@ -50,11 +61,13 @@ def extract_sample(frames_u8, actions_u8, t, delta, K, H, lo=-1.0, hi=1.0):
 class EpisodeDataset(Dataset):
     def __init__(self, data_dir: str, *, K: int = 4, H: int = 8,
                  deltas: tuple = (8, 16, 24, 32), lo: float = -1.0, hi: float = 1.0,
-                 max_episodes: int | None = None, preload: bool = True):
+                 max_episodes: int | None = None, preload: bool = True,
+                 goal: bool = False):
         self.data_dir = data_dir
         self.K, self.H = K, H
         self.deltas = deltas
         self.lo, self.hi = lo, hi
+        self.goal = goal
 
         self.paths = sorted(glob.glob(os.path.join(data_dir, "episode_*.npz")))
         if max_episodes is not None:
@@ -96,10 +109,15 @@ class EpisodeDataset(Dataset):
             d = self._load(i)
             T = d["frames"].shape[0]
             H = self.H
-            for t in range(self.K - 1, T - H):      # need K history + H actions
-                for delta in self.deltas:
-                    if t + delta < T:
-                        self.index.append((i, t, delta))
+            if self.goal:
+                # goal mode: one sample per timestep (subgoal = terminal frame)
+                for t in range(self.K - 1, T - H):
+                    self.index.append((i, t, 0))
+            else:
+                for t in range(self.K - 1, T - H):      # need K history + H actions
+                    for delta in self.deltas:
+                        if t + delta < T:
+                            self.index.append((i, t, delta))
 
     def __len__(self):
         return len(self.index)
@@ -108,7 +126,7 @@ class EpisodeDataset(Dataset):
         ep_idx, t, delta = self.index[idx]
         d = self._load(ep_idx)
         sample = extract_sample(d["frames"], d["actions"], t, delta,
-                                self.K, self.H, self.lo, self.hi)
+                                self.K, self.H, self.lo, self.hi, goal=self.goal)
         sample["episode"] = ep_idx
         sample["t"] = t
         sample["instruction"] = d["meta"]["instruction"]

@@ -31,6 +31,7 @@ class SplitConfig:
     min_distractors: int = 1
     max_distractors: int = 3
     n_obstacles: int = 1
+    n_obstacles_max: int = 0  # 0 = use n_obstacles exactly; else sample in [n_obstacles, n_obstacles_max]
     shape_only_p: float = 0.15
     force_obstacle: bool = False
     force_long: bool = False
@@ -62,15 +63,24 @@ SPLIT_CONFIGS: dict[str, SplitConfig] = {
     # long-horizon: forced long distance
     "ood_long": SplitConfig(min_distractors=1, max_distractors=3, n_obstacles=1,
                             force_long=True, shape_only_p=0.15),
+    # wide training distribution: more distractors + a range of obstacles,
+    # to close the gap to the dense-distractor / multi-obstacle OOD splits.
+    "train_wide": SplitConfig(min_distractors=1, max_distractors=6, n_obstacles=1,
+                              n_obstacles_max=3, shape_only_p=0.15),
 }
 
 
 def generate_episode(rng: np.random.Generator, cfg: SplitConfig) -> dict:
     """Run one expert episode and collect frames + actions + metadata."""
+    # sample the number of obstacles per episode if a range is requested
+    if cfg.n_obstacles_max > cfg.n_obstacles:
+        n_obs = int(rng.integers(cfg.n_obstacles, cfg.n_obstacles_max + 1))
+    else:
+        n_obs = cfg.n_obstacles
     task_kwargs = dict(
         min_distractors=cfg.min_distractors,
         max_distractors=cfg.max_distractors,
-        n_obstacles=cfg.n_obstacles,
+        n_obstacles=n_obs,
         shape_only_p=cfg.shape_only_p,
         force_obstacle=cfg.force_obstacle,
         force_long=cfg.force_long,

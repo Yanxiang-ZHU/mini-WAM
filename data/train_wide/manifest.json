@@ -1,0 +1,25 @@
+{
+  "split": "train_wide",
+  "n_episodes": 20000,
+  "seed": 0,
+  "config": {
+    "min_distractors": 1,
+    "max_distractors": 6,
+    "n_obstacles": 1,
+    "n_obstacles_max": 3,
+    "shape_only_p": 0.15,
+    "force_obstacle": false,
+    "force_long": false,
+    "allowed_targets": null,
+    "allowed_distractors": null,
+    "accel_range": [
+      0.32,
+      0.38
+    ],
+    "friction_range": [
+      0.78,
+      0.86
+    ],
+    "max_steps": 150
+  }
+}

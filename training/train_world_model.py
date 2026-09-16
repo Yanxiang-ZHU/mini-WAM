@@ -65,16 +65,19 @@ def main():
     t = cfg["training"]
     hist = cfg["history"]["frames"]
     H = cfg["action"].get("horizon", 8) if "action" in cfg else 8
+    goal = t.get("goal", False)
     model_cfg = {**cfg["model"], "history": hist}
     model = WorldModel(model_cfg).to(device)
-    print(f"world model params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
+    print(f"world model params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M"
+          f"  (goal subgoal: {goal})")
 
     train_loader = make_loader(t["data"], t["batch_size"], K=hist, H=H,
                                deltas=tuple(t["deltas"]), workers=t["workers"],
-                               max_episodes=t.get("max_episodes"))
+                               max_episodes=t.get("max_episodes"), goal=goal)
     val_loader = make_loader(t["val_data"], t["batch_size"], K=hist, H=H,
                              deltas=tuple(t["deltas"]), workers=t["workers"],
-                             shuffle=False, max_episodes=t.get("max_episodes"))
+                             shuffle=False, max_episodes=t.get("max_episodes"),
+                             goal=goal)
 
     opt = torch.optim.AdamW(model.parameters(), lr=t["learning_rate"],
                             weight_decay=t["weight_decay"])

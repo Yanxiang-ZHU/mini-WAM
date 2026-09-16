@@ -104,8 +104,10 @@ docs/          this doc + report.md
 ## 4. `data/` — dataset
 
 ### `generator.py`
-- `SplitConfig` dataclass + `SPLIT_CONFIGS` for `train/val/test` and the OOD
-  splits (`ood_combo`, `ood_distractors`, `ood_layout`, `ood_long`).
+- `SplitConfig` dataclass + `SPLIT_CONFIGS` for `train/val/test`, the OOD splits
+  (`ood_combo`, `ood_distractors`, `ood_layout`, `ood_long`), and `train_wide`
+  (the diverse training distribution: 1–6 distractors, 1–3 obstacles via
+  `n_obstacles_max`).
 - `HELD_OUT_COMBOS` — the three held-out shape×fill pairs used for compositional
   OOD (training never sees them).
 - `generate_episode(rng, cfg)` runs the expert, collects frames + actions +
@@ -124,10 +126,14 @@ docs/          this doc + report.md
   `(episode, t, subgoal_delta)` triples, and yields samples.
 - `extract_sample` returns `history (K,48,48)`, `subgoal (48,48)`,
   `subgoal_delta`, `action_chunk (H,)`, `action_onehot (H,4)`.
+- **`goal` mode**: when `goal=True`, the subgoal is the *terminal frame* (player
+  at/near the target) — a goal-state conditioning à la π0 image goals — instead
+  of a short-horizon future frame. This is the mode that makes the subgoal
+  informative (see `docs/report.md` §7).
 - `collate` stacks a batch. Frames are normalised `[0,1] → [-1,1]`.
-- **Why store full frames?** the visual-subgoal horizon Δ is a sampling choice at
-  train time, so storing full trajectories lets you ablate the horizon without
-  regenerating data.
+- **Why store full frames?** the subgoal horizon is a sampling choice at train
+  time, so storing full trajectories lets you switch between short-horizon and
+  goal-state subgoals (or ablate the horizon) without regenerating data.
 
 ### `validator.py`
 - Structural + semantic integrity checks (shape, action range, instruction→target
@@ -161,6 +167,11 @@ docs/          this doc + report.md
   jointly with history tokens, conditioned by `c` via adaLN, and predicts the
   velocity field (unpatchified back to 48×48). `loss()` does flow matching;
   `sample()` runs Euler integration.
+- **Object-weighted loss** (`obj_weight`, default 20): non-background pixels
+  (objects + player, value > 0 in the target frame) are up-weighted in the
+  flow-matching loss, so the model learns to render objects sharply instead of
+  being dominated by the background. This is the change that made the world model
+  generate reliable goal states (real-vs-generated subgoal gap 7.2 → 1.4 points).
 
 ### `action_expert.py`
 - `ActionExpert(cfg)`: embeds a noisy `(H,4)` action chunk into tokens, attends
@@ -174,7 +185,10 @@ docs/          this doc + report.md
 ### `cascade_wam.py`
 - `CascadeWAM` wires WM + AE with a history buffer, `observe(frame)`,
   `set_instruction(text)`, `step()` → chunk. Oracle subtask derived lexically.
-  Synchronous by default; a stale-subgoal buffer exists for async mode.
+- **Async low-frequency subgoal (π0.7-style)**: the world model runs in a
+  background thread and refreshes the subgoal every `subgoal_update_every` steps
+  (default 5); the action expert consumes the latest (possibly stale) subgoal and
+  never blocks. `async_mode=False` falls back to synchronous low-frequency updates.
 
 ---
 

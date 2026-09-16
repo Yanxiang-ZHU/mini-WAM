@@ -1,0 +1,47 @@
+# Action Expert — goal-state subgoal + Phase 6 + cosine LR, trained on the WIDE
+# distribution. Uses the wide-trained world model for generated-subgoal mixing.
+seed: 42
+device: cuda
+
+image:
+  width: 48
+  height: 48
+  channels: 1
+
+history:
+  frames: 4
+
+action:
+  horizon: 8
+  execute_steps: 2
+  num_actions: 4
+
+model:
+  hidden_dim: 256
+  layers: 6
+  heads: 8
+  patch: 8
+  lang_layers: 2
+  lang_heads: 4
+  denoise_steps: 4
+  use_subgoal: true
+
+training:
+  data: data/train_wide
+  val_data: data/val
+  batch_size: 128
+  epochs: 15
+  learning_rate: 0.0002
+  weight_decay: 0.0
+  workers: 4
+  deltas: [8, 16, 24, 32]
+  goal: true
+  generated_ratio: 0.25
+  max_episodes: null
+  save_every: 1
+  mixed_precision: true
+
+checkpoint:
+  dir: checkpoints
+  name: action_expert_goal_wide
+  world_model_path: checkpoints/world_model_goal_wide_best.pt
