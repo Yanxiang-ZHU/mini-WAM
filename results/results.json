@@ -1,0 +1,464 @@
+{
+  "args": {
+    "simple": "checkpoints/simple_policy_best.pt",
+    "action_expert": "checkpoints/action_expert_best.pt",
+    "action_chunk": "checkpoints/action_chunk_policy_best.pt",
+    "world_model": "checkpoints/world_model_best.pt",
+    "episodes": 200,
+    "execute_steps": 2,
+    "seed": 0,
+    "device": "cuda",
+    "out": "results"
+  },
+  "main": {
+    "simple_policy": {
+      "n_episodes": 200,
+      "success_rate": 0.525,
+      "avg_episode_length": 115.06,
+      "avg_final_distance": 10.413805230523272,
+      "avg_collisions": 33.4,
+      "action_efficiency": 0.4484295124649272
+    },
+    "action_chunk": {
+      "n_episodes": 200,
+      "success_rate": 0.625,
+      "avg_episode_length": 111.12,
+      "avg_final_distance": 9.359718534854029,
+      "avg_collisions": 35.705,
+      "action_efficiency": 0.4154888377836825
+    },
+    "cascade": {
+      "n_episodes": 200,
+      "success_rate": 0.59,
+      "avg_episode_length": 115.905,
+      "avg_final_distance": 11.104581289541684,
+      "avg_collisions": 24.625,
+      "action_efficiency": 0.4223379223756543
+    }
+  },
+  "ood": {
+    "simple_policy": {
+      "test": {
+        "n_episodes": 200,
+        "success_rate": 0.525,
+        "avg_episode_length": 115.06,
+        "avg_final_distance": 10.413805230523272,
+        "avg_collisions": 33.4,
+        "action_efficiency": 0.4484295124649272,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 1,
+          "shape_only_p": 0.15,
+          "force_obstacle": false,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_combo": {
+        "n_episodes": 200,
+        "success_rate": 0.53,
+        "avg_episode_length": 114.29,
+        "avg_final_distance": 10.085252199264268,
+        "avg_collisions": 36.12,
+        "action_efficiency": 0.5350129822422908,
+        "split_config": {
+          "min_distractors": 2,
+          "max_distractors": 4,
+          "n_obstacles": 1,
+          "shape_only_p": 0.0,
+          "force_obstacle": false,
+          "force_long": false,
+          "allowed_targets": [
+            [
+              "circle",
+              "hollow"
+            ],
+            [
+              "triangle",
+              "solid"
+            ],
+            [
+              "square",
+              "hollow"
+            ]
+          ],
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_distractors": {
+        "n_episodes": 200,
+        "success_rate": 0.41,
+        "avg_episode_length": 135.915,
+        "avg_final_distance": 13.223990229057936,
+        "avg_collisions": 60.245,
+        "action_efficiency": 0.3506156559848992,
+        "split_config": {
+          "min_distractors": 5,
+          "max_distractors": 8,
+          "n_obstacles": 1,
+          "shape_only_p": 0.0,
+          "force_obstacle": false,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_layout": {
+        "n_episodes": 200,
+        "success_rate": 0.445,
+        "avg_episode_length": 129.145,
+        "avg_final_distance": 12.262238331619336,
+        "avg_collisions": 81.0,
+        "action_efficiency": 0.5681562354474764,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 3,
+          "shape_only_p": 0.15,
+          "force_obstacle": true,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_long": {
+        "n_episodes": 200,
+        "success_rate": 0.485,
+        "avg_episode_length": 127.77,
+        "avg_final_distance": 10.77759222014434,
+        "avg_collisions": 36.43,
+        "action_efficiency": 0.45029607178626463,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 1,
+          "shape_only_p": 0.15,
+          "force_obstacle": false,
+          "force_long": true,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      }
+    },
+    "action_chunk": {
+      "test": {
+        "n_episodes": 200,
+        "success_rate": 0.645,
+        "avg_episode_length": 103.785,
+        "avg_final_distance": 8.88235063675058,
+        "avg_collisions": 32.895,
+        "action_efficiency": 0.43854277079526777,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 1,
+          "shape_only_p": 0.15,
+          "force_obstacle": false,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_combo": {
+        "n_episodes": 200,
+        "success_rate": 0.57,
+        "avg_episode_length": 122.36,
+        "avg_final_distance": 10.709838566552584,
+        "avg_collisions": 30.925,
+        "action_efficiency": 0.46646554501523596,
+        "split_config": {
+          "min_distractors": 2,
+          "max_distractors": 4,
+          "n_obstacles": 1,
+          "shape_only_p": 0.0,
+          "force_obstacle": false,
+          "force_long": false,
+          "allowed_targets": [
+            [
+              "circle",
+              "hollow"
+            ],
+            [
+              "triangle",
+              "solid"
+            ],
+            [
+              "square",
+              "hollow"
+            ]
+          ],
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_distractors": {
+        "n_episodes": 200,
+        "success_rate": 0.4,
+        "avg_episode_length": 144.985,
+        "avg_final_distance": 14.713714228261884,
+        "avg_collisions": 42.99,
+        "action_efficiency": 0.2945683092508201,
+        "split_config": {
+          "min_distractors": 5,
+          "max_distractors": 8,
+          "n_obstacles": 1,
+          "shape_only_p": 0.0,
+          "force_obstacle": false,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_layout": {
+        "n_episodes": 200,
+        "success_rate": 0.5,
+        "avg_episode_length": 129.98,
+        "avg_final_distance": 11.916851644864355,
+        "avg_collisions": 80.485,
+        "action_efficiency": 0.5419601508167711,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 3,
+          "shape_only_p": 0.15,
+          "force_obstacle": true,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_long": {
+        "n_episodes": 200,
+        "success_rate": 0.62,
+        "avg_episode_length": 118.355,
+        "avg_final_distance": 9.341529136837316,
+        "avg_collisions": 30.795,
+        "action_efficiency": 0.4525101655181612,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 1,
+          "shape_only_p": 0.15,
+          "force_obstacle": false,
+          "force_long": true,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      }
+    },
+    "cascade": {
+      "test": {
+        "n_episodes": 200,
+        "success_rate": 0.575,
+        "avg_episode_length": 115.7,
+        "avg_final_distance": 11.190879529797158,
+        "avg_collisions": 27.97,
+        "action_efficiency": 0.40189165025468776,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 1,
+          "shape_only_p": 0.15,
+          "force_obstacle": false,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_combo": {
+        "n_episodes": 200,
+        "success_rate": 0.48,
+        "avg_episode_length": 132.705,
+        "avg_final_distance": 12.71204882933027,
+        "avg_collisions": 30.985,
+        "action_efficiency": 0.3695860552938262,
+        "split_config": {
+          "min_distractors": 2,
+          "max_distractors": 4,
+          "n_obstacles": 1,
+          "shape_only_p": 0.0,
+          "force_obstacle": false,
+          "force_long": false,
+          "allowed_targets": [
+            [
+              "circle",
+              "hollow"
+            ],
+            [
+              "triangle",
+              "solid"
+            ],
+            [
+              "square",
+              "hollow"
+            ]
+          ],
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_distractors": {
+        "n_episodes": 200,
+        "success_rate": 0.42,
+        "avg_episode_length": 140.65,
+        "avg_final_distance": 14.73663191543037,
+        "avg_collisions": 31.425,
+        "action_efficiency": 0.3513171763050477,
+        "split_config": {
+          "min_distractors": 5,
+          "max_distractors": 8,
+          "n_obstacles": 1,
+          "shape_only_p": 0.0,
+          "force_obstacle": false,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_layout": {
+        "n_episodes": 200,
+        "success_rate": 0.49,
+        "avg_episode_length": 128.505,
+        "avg_final_distance": 12.804151401598693,
+        "avg_collisions": 64.745,
+        "action_efficiency": 0.5541547240210762,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 3,
+          "shape_only_p": 0.15,
+          "force_obstacle": true,
+          "force_long": false,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      },
+      "ood_long": {
+        "n_episodes": 200,
+        "success_rate": 0.555,
+        "avg_episode_length": 125.695,
+        "avg_final_distance": 11.38798546013452,
+        "avg_collisions": 29.755,
+        "action_efficiency": 0.4096132059911644,
+        "split_config": {
+          "min_distractors": 1,
+          "max_distractors": 3,
+          "n_obstacles": 1,
+          "shape_only_p": 0.15,
+          "force_obstacle": false,
+          "force_long": true,
+          "accel_range": [
+            0.32,
+            0.38
+          ],
+          "friction_range": [
+            0.78,
+            0.86
+          ],
+          "max_steps": 150
+        }
+      }
+    }
+  }
+}

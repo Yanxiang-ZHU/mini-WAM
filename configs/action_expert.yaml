@@ -1,0 +1,44 @@
+# Action Expert (flow-matching action chunk generator).
+seed: 42
+device: cuda
+
+image:
+  width: 48
+  height: 48
+  channels: 1
+
+history:
+  frames: 4
+
+action:
+  horizon: 8
+  execute_steps: 2
+  num_actions: 4
+
+model:
+  hidden_dim: 256
+  layers: 6
+  heads: 8
+  patch: 8
+  lang_layers: 2
+  lang_heads: 4
+  denoise_steps: 4
+
+training:
+  data: data/train
+  val_data: data/val
+  batch_size: 128
+  epochs: 8
+  learning_rate: 0.0002
+  weight_decay: 0.0
+  workers: 4
+  deltas: [8, 16, 24, 32]
+  max_episodes: null
+  save_every: 1
+  mixed_precision: true
+  # fraction of training subgoals that are generated (Phase 6); start at 0 (real only)
+  generated_subgoal_ratio: 0.0
+
+checkpoint:
+  dir: checkpoints
+  name: action_expert

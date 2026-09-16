@@ -1,0 +1,44 @@
+# Cascade WAM (world model + action expert integrated).
+seed: 42
+device: cuda
+
+image:
+  width: 48
+  height: 48
+  channels: 1
+
+history:
+  frames: 4
+
+action:
+  horizon: 8
+  execute_steps: 2
+  num_actions: 4
+
+world_model:
+  hidden_dim: 256
+  layers: 6
+  heads: 8
+  patch: 8
+  denoise_steps: 4
+
+action_model:
+  hidden_dim: 256
+  layers: 6
+  heads: 8
+  patch: 8
+  denoise_steps: 4
+
+training:
+  batch_size: 64
+  learning_rate: 0.0001
+
+inference:
+  synchronous: true
+  subtask_mode: oracle
+
+checkpoint:
+  dir: checkpoints
+  name: cascade_wam
+  world_model_path: checkpoints/world_model_best.pt
+  action_expert_path: checkpoints/action_expert_best.pt

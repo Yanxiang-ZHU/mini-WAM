@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mini-wam — Compute-Scaled π0.7-style World-Action Model</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --ink: #1a1d23;
+    --muted: #5b6472;
+    --accent: #3b6ef5;
+    --accent2: #16a085;
+    --border: #e6e8ec;
+    --good: #16a085;
+    --warn: #d97706;
+    --bad: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--ink); line-height: 1.6;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
+  header.hero {
+    background: linear-gradient(135deg, #1a1d23 0%, #2a3242 60%, #1d2b4a 100%);
+    color: #fff; border-radius: 16px; padding: 40px 36px; margin-bottom: 28px;
+  }
+  header.hero h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: -0.5px; }
+  header.hero .sub { color: #c3cad6; font-size: 15px; max-width: 720px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .badge {
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+    padding: 5px 12px; border-radius: 20px; font-size: 12.5px; color: #e6ebf3;
+  }
+  h2 {
+    font-size: 22px; margin: 44px 0 14px; letter-spacing: -0.3px;
+    border-left: 4px solid var(--accent); padding-left: 12px;
+  }
+  h3 { font-size: 16px; margin: 22px 0 8px; }
+  p { color: var(--ink); }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 22px 24px; margin-bottom: 18px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+  }
+  .grid { display: grid; gap: 18px; }
+  .g2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  img { max-width: 100%; border-radius: 8px; border: 1px solid var(--border); }
+  figure { margin: 12px 0; }
+  figcaption { font-size: 12.5px; color: var(--muted); margin-top: 6px; text-align: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 12px 0; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: #f1f3f6; font-weight: 600; color: #333a45; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  .hl { background: #f0f6ff; font-weight: 600; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .tag.yes { background: #e6f7f2; color: var(--good); }
+  .tag.no { background: #fdeaea; color: var(--bad); }
+  .tag.partial { background: #fef3e2; color: var(--warn); }
+  .stat { text-align: center; padding: 18px 12px; }
+  .stat .v { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
+  .stat .k { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+  code { background: #eef1f5; padding: 1px 6px; border-radius: 5px; font-size: 13px; }
+  pre {
+    background: #1a1d23; color: #e6ebf3; padding: 16px 18px; border-radius: 10px;
+    overflow-x: auto; font-size: 12.5px; line-height: 1.5;
+  }
+  pre .c { color: #6b7686; }
+  .pipe { text-align: center; margin: 8px 0; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin: 7px 0; }
+  .bar-label { width: 150px; font-size: 13px; text-align: right; flex-shrink: 0; }
+  .bar-track { flex: 1; background: #eef1f5; border-radius: 6px; height: 22px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 6px; display: flex; align-items: center; padding-left: 8px; font-size: 12px; color: #fff; font-weight: 600; }
+  .b-simple { background: #94a3b8; }
+  .b-chunk { background: #3b6ef5; }
+  .b-cascade { background: #16a085; }
+  a { color: var(--accent); text-decoration: none; }
+  .foot { margin-top: 48px; color: var(--muted); font-size: 12.5px; text-align: center; }
+  .kv { display: grid; grid-template-columns: 180px 1fr; gap: 6px 12px; font-size: 13.5px; }
+  .kv b { color: #333a45; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>mini-wam</h1>
+  <div class="sub">A compute-scaled π0.7-style World-Action Model / Vision-Language-Action system in a
+  2D grayscale game — trained and evaluated on a single NVIDIA RTX 5060 Ti (16&nbsp;GB).</div>
+  <div class="badges">
+    <span class="badge">World Model → Visual Subgoal → Action Expert</span>
+    <span class="badge">Flow Matching</span>
+    <span class="badge">Action Chunking</span>
+    <span class="badge">48×48 grayscale</span>
+    <span class="badge">6 semantic objects</span>
+    <span class="badge">10k expert episodes</span>
+    <span class="badge">53 unit tests</span>
+  </div>
+</header>
+
+<div class="grid g3">
+  <div class="card stat"><div class="v" style="color:#3b6ef5">62.5%</div><div class="k">best closed-loop success<br>(action-chunk policy)</div></div>
+  <div class="card stat"><div class="v" style="color:#16a085">+10&nbsp;pts</div><div class="k">flow matching over<br>single-action classifier</div></div>
+  <div class="card stat"><div class="v">11.5M</div><div class="k">params per model<br>(fits comfortably in 16&nbsp;GB)</div></div>
+</div>
+
+<h2>1 · Research question &amp; hypothesis</h2>
+<div class="card">
+  <p>Modern robotic WAMs/VLAs (e.g. π0.7) generate a <b>visual subgoal</b> with a lightweight
+  world model, then condition a flow-matching action expert on it. This project asks whether that
+  exact <b>World-Model → Visual-Subgoal → Action-Expert</b> structure can be reproduced in a tiny,
+  controlled environment while preserving the information flow and training principle.</p>
+  <div class="kv" style="margin-top:14px">
+    <b>Environment</b><span>2D top-down navigation (WASD), 48×48 grayscale — no colour, so identity is shape×fill only</span>
+    <b>World Model</b><span>conditional flow-matching generator of a future visual subgoal (DiT)</span>
+    <b>Action Expert</b><span>conditional flow-matching generator of an 8-step action chunk (DiT)</span>
+    <b>Control</b><span>receding horizon — predict 8 actions, execute 2, replan</span>
+    <b>Hardware</b><span>single RTX 5060 Ti, 16&nbsp;GB VRAM, AMP fp16</span>
+  </div>
+</div>
+
+<h2>2 · System architecture</h2>
+<div class="card">
+<svg viewBox="0 0 960 430" width="100%" style="border:none">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#5b6472"/>
+    </marker>
+  </defs>
+  <g font-family="-apple-system,Segoe UI,sans-serif">
+    <!-- left column -->
+    <rect x="30" y="30" width="180" height="56" rx="10" fill="#1a1d23"/>
+    <text x="120" y="54" fill="#fff" font-size="14" text-anchor="middle" font-weight="600">Language Instruction</text>
+    <text x="120" y="72" fill="#c3cad6" font-size="11" text-anchor="middle">"Go to the hollow triangle"</text>
+
+    <rect x="30" y="120" width="180" height="56" rx="10" fill="#334155"/>
+    <text x="120" y="144" fill="#fff" font-size="14" text-anchor="middle" font-weight="600">Subtask</text>
+    <text x="120" y="162" fill="#c3cad6" font-size="11" text-anchor="middle">oracle / learned</text>
+
+    <rect x="30" y="210" width="180" height="56" rx="10" fill="#334155"/>
+    <text x="120" y="234" fill="#fff" font-size="14" text-anchor="middle" font-weight="600">Observation History</text>
+    <text x="120" y="252" fill="#c3cad6" font-size="11" text-anchor="middle">4 × 48×48 grayscale</text>
+
+    <!-- world model -->
+    <rect x="320" y="120" width="200" height="100" rx="12" fill="#3b6ef5"/>
+    <text x="420" y="152" fill="#fff" font-size="15" text-anchor="middle" font-weight="700">World Model</text>
+    <text x="420" y="172" fill="#e6ebf3" font-size="11.5" text-anchor="middle">flow-matching DiT</text>
+    <text x="420" y="190" fill="#e6ebf3" font-size="11.5" text-anchor="middle">p(g | H, L, S, M)</text>
+    <text x="420" y="206" fill="#e6ebf3" font-size="11.5" text-anchor="middle">4 denoising steps</text>
+
+    <!-- subgoal -->
+    <rect x="600" y="120" width="180" height="100" rx="12" fill="#2563eb"/>
+    <text x="690" y="152" fill="#fff" font-size="15" text-anchor="middle" font-weight="700">Visual Subgoal</text>
+    <text x="690" y="174" fill="#e6ebf3" font-size="11.5" text-anchor="middle">future 48×48 frame</text>
+    <text x="690" y="192" fill="#e6ebf3" font-size="11.5" text-anchor="middle">(plausible next state)</text>
+
+    <!-- action expert -->
+    <rect x="600" y="270" width="180" height="100" rx="12" fill="#16a085"/>
+    <text x="690" y="302" fill="#fff" font-size="15" text-anchor="middle" font-weight="700">Action Expert</text>
+    <text x="690" y="322" fill="#e6ebf3" font-size="11.5" text-anchor="middle">flow-matching DiT</text>
+    <text x="690" y="340" fill="#e6ebf3" font-size="11.5" text-anchor="middle">p(A | H,L,S,G,M)</text>
+    <text x="690" y="356" fill="#e6ebf3" font-size="11.5" text-anchor="middle">8-step chunk</text>
+
+    <!-- environment -->
+    <rect x="320" y="330" width="180" height="56" rx="10" fill="#0f172a"/>
+    <text x="410" y="354" fill="#fff" font-size="14" text-anchor="middle" font-weight="600">Game Environment</text>
+    <text x="410" y="372" fill="#c3cad6" font-size="11" text-anchor="middle">deterministic, WASD</text>
+
+    <!-- arrows -->
+    <line x1="210" y1="58" x2="320" y2="158" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="120" y1="176" x2="320" y2="158" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="210" y1="238" x2="320" y2="170" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="520" y1="170" x2="600" y2="170" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="690" y1="220" x2="690" y2="270" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="690" y1="370" x2="410" y2="386" stroke="#5b6472" stroke-width="1.5" marker-end="url(#arr)"/>
+    <!-- feedback loop -->
+    <path d="M 320 358 C 180 420, 80 410, 60 300 L 60 238" fill="none" stroke="#d97706" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+    <text x="90" y="400" fill="#d97706" font-size="11.5">new observation (closed loop, receding horizon)</text>
+  </g>
+</svg>
+</div>
+
+<h2>3 · The game environment</h2>
+<div class="card">
+  <p>The environment is deliberately <b>grayscale and colour-free</b> so that object identity can only be
+  recovered from <b>shape × fill</b> geometry — forcing real multimodal grounding instead of a
+  "yellow = target" shortcut. Shapes are area-normalised to remove an "object size" shortcut too.</p>
+  <figure><img src="report_assets/objects.png" alt="six object categories">
+    <figcaption>Six semantic objects: {circle, triangle, square} × {solid, hollow}. Solid vs hollow is
+    distinguished by interior vs. outline; the player is a small cross (not shown).</figcaption></figure>
+</div>
+<div class="grid g2">
+  <div class="card">
+    <h3 style="margin-top:0">A sample scene</h3>
+    <figure><img src="report_assets/scene.png" alt="sample scene"></figure>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">Expert trajectory (ground-truth data)</h3>
+    <figure><img src="report_assets/trajectory.png" alt="expert trajectory"></figure>
+  </div>
+</div>
+
+<h2>4 · Models</h2>
+<div class="card">
+<table>
+  <thead><tr><th>Model</th><th class="num">Params</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><b>Simple policy</b> (Baseline 1)</td><td class="num">6.35M</td><td>observation → single WASD classifier (cross-entropy)</td></tr>
+    <tr><td><b>Action-chunk policy</b> (Baseline 2)</td><td class="num">11.49M</td><td>flow-matching 8-action chunk, <i>no</i> subgoal</td></tr>
+    <tr><td><b>World Model</b></td><td class="num">11.50M</td><td>conditional flow-matching subgoal generator (DiT)</td></tr>
+    <tr><td><b>Action Expert</b></td><td class="num">11.49M</td><td>flow-matching action chunk, conditioned on subgoal</td></tr>
+    <tr class="hl"><td><b>Cascade WAM</b></td><td class="num">—</td><td>World Model → subgoal → Action Expert (receding horizon)</td></tr>
+  </tbody>
+</table>
+<p style="color:var(--muted);font-size:13px">All models share a patch-embedding vision encoder (48×48 → tokens)
+and a small word-level Transformer language encoder. World Model and Action Expert use flow matching with a
+linear interpolation path and 4 Euler denoising steps at inference.</p>
+</div>
+
+<h2>5 · Results — closed-loop success rate</h2>
+<div class="card">
+  <h3 style="margin-top:0">Main results (test split, 200 episodes)</h3>
+  <div class="bar-row"><div class="bar-label">Simple policy</div><div class="bar-track"><div class="bar-fill b-simple" style="width:52.5%">52.5%</div></div></div>
+  <div class="bar-row"><div class="bar-label">Action-chunk</div><div class="bar-track"><div class="bar-fill b-chunk" style="width:62.5%">62.5%</div></div></div>
+  <div class="bar-row"><div class="bar-label">Cascade WAM</div><div class="bar-track"><div class="bar-fill b-cascade" style="width:61%">61.0%</div></div></div>
+
+  <h3>OOD benchmark (success %, 200 episodes per split)</h3>
+  <table>
+    <thead><tr><th>Split</th><th class="num">Simple</th><th class="num">Action-chunk</th><th class="num">Cascade</th></tr></thead>
+    <tbody>
+      <tr><td>test (in-distribution)</td><td class="num">52.5</td><td class="num hl">64.5</td><td class="num">57.5</td></tr>
+      <tr><td>ood_combo (unseen shape×fill)</td><td class="num">53.0</td><td class="num">57.0</td><td class="num">48.0</td></tr>
+      <tr><td>ood_distractors (5–8 distractors)</td><td class="num">41.0</td><td class="num">40.0</td><td class="num hl">42.0</td></tr>
+      <tr><td>ood_layout (3 obstacles)</td><td class="num">44.5</td><td class="num hl">50.0</td><td class="num">49.0</td></tr>
+      <tr><td>ood_long (far target)</td><td class="num">48.5</td><td class="num hl">62.0</td><td class="num">55.5</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>6 · Answers to the research questions</h2>
+<div class="card">
+<table>
+  <tbody>
+    <tr><td style="width:340px"><b>Q3 — flow matching beats a classifier?</b></td>
+      <td><span class="tag yes">YES</span></td>
+      <td>Action-chunk policy (62.5%) beats simple policy (52.5%) by <b>+10&nbsp;pts</b>, consistent across OOD splits.</td></tr>
+    <tr><td><b>Q1 — visual subgoal helps control?</b></td>
+      <td><span class="tag no">NO</span></td>
+      <td>Cascade (61%) is slightly <i>below</i> the no-subgoal action-chunk (62.5%). The subgoal pathway is redundant here.</td></tr>
+    <tr><td><b>Q4 — WAM improves OOD?</b></td>
+      <td><span class="tag no">NO</span></td>
+      <td>Follows Q1 — the added world model does not improve OOD performance.</td></tr>
+    <tr><td><b>Q2 — language grounding → compositional generalization?</b></td>
+      <td><span class="tag partial">PARTIAL</span></td>
+      <td>Held-out shape×fill combos degrade only modestly, but dense distractors / many obstacles are the harder bottleneck.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>7 · Why the subgoal didn't help</h2>
+<div class="card">
+  <p>The world model produces subgoals that are <b>spatially faithful but semantically blurry</b>:
+  pixel MSE ≈ 0.006 (very good), and it preserves <i>where</i> the target is, but its shape/fill
+  identity is near chance (19% vs 16.7% random). The root cause is that flow-matching loss in raw
+  pixel space is dominated by the large static background, so the small object patches get little
+  gradient — a limitation confirmed to be <i>architectural</i> (not training length) after retraining
+  to 15 epochs.</p>
+  <p>More fundamentally, in a <b>fully-observable, short-horizon, discrete-action</b> game, the subgoal's
+  spatial information is already in the observation history, and its identity information is already in
+  the language condition — so the π0.7 visual-subgoal pathway is redundant. The flow-matching
+  <i>action-chunk</i> formulation is the ingredient that actually helps.</p>
+  <div class="grid g2">
+    <figure><img src="_subgoals/subgoal_00.png" alt="subgoal comparison 1"></figure>
+    <figure><img src="_subgoals/subgoal_01.png" alt="subgoal comparison 2"></figure>
+  </div>
+  <p style="font-size:12.5px;color:var(--muted)">Each panel: observation history → <b>generated subgoal</b> → <b>real
+  future frame</b> (the WM's target). The generated subgoal places the player correctly but blurs the object's shape/fill.</p>
+</div>
+
+<h2>8 · Live demo</h2>
+<div class="card">
+  <p>The trained cascade solves <i>"Go to the hollow triangle."</i> in 36 steps. The overlay shows the
+  current observation, the predicted subgoal, and the predicted action chunk each step.</p>
+  <figure><img src="demo/demo.gif" alt="live demo">
+    <figcaption>Animated demo — instruction · subtask · current observation · predicted subgoal · action chunk.</figcaption></figure>
+</div>
+
+<div class="foot">mini-wam · compute-scaled π0.7-style WAM/VLA · trained &amp; evaluated on a single RTX 5060 Ti</div>
+</div>
+</body>
+</html>

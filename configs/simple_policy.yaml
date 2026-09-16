@@ -1,0 +1,37 @@
+# Simple policy baseline (observation -> single WASD classifier).
+seed: 42
+device: cuda
+
+image:
+  width: 48
+  height: 48
+  channels: 1
+
+history:
+  frames: 4
+
+model:
+  hidden_dim: 256
+  layers: 4
+  heads: 8
+  patch: 8
+  lang_layers: 2
+  lang_heads: 4
+  num_actions: 4
+
+training:
+  data: data/train
+  val_data: data/val
+  batch_size: 128
+  epochs: 10
+  learning_rate: 0.0003
+  weight_decay: 0.0
+  workers: 4
+  deltas: [8, 16, 24, 32]
+  max_episodes: null
+  save_every: 1
+  mixed_precision: true
+
+checkpoint:
+  dir: checkpoints
+  name: simple_policy

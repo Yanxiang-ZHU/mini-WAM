@@ -1,0 +1,8 @@
+# Install torch separately with the CUDA index for Blackwell (RTX 50xx):
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
+torch>=2.7
+torchvision
+numpy
+pyyaml
+matplotlib
+tqdm

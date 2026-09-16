@@ -1,0 +1,16 @@
+# Game environment configuration.
+seed: 42
+
+env:
+  width: 48
+  height: 48
+  accel: 0.35
+  friction: 0.82
+  max_speed: 3.0
+  history: 4
+  max_steps: 150
+
+objects:
+  size: 4.0
+  reach_radius: 4.5
+  player_radius: 1.6
