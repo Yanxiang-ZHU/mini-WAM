@@ -8,7 +8,7 @@ the core computational structure of a modern WAM/VLA such as π0.7 — **World M
 → visual subgoal → flow-matching action expert** — while shrinking the visual
 complexity, model size, action dimension, dataset size and compute enough to
 train and run the whole system on a single consumer GPU (NVIDIA RTX 5060 Ti,
-16 GB). **And furthermore apply quick testing environment for new architectures.**
+16 GB). **And furthermore make quick testing environment for new architectures.**
 
 ```
 Language Instruction
