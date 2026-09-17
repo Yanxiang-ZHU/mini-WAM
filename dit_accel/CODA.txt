@@ -1,0 +1,2626 @@
+CODA: Algorithm-Hardware Co-design for Edge Video Diffusion
+via NMP-Enabled Compute-Cache Operator Disaggregation
+Yuanpeng Zhang
+Peking University
+Beijing, China
+zyp_cs@pku.edu.cn
+YuXuan Wu
+Peking University
+Beijing, China
+2300011492@stu.pku.edu.cn
+Yitong Xiao
+Peking University
+Beijing, China
+xiaoyt@stu.pku.edu.cn
+Chenhao Xue
+Peking University
+Beijing, China
+xch927027@pku.edu.cn
+Yi Ren
+Peking University
+Beijing, China
+yiren20@stu.pku.edu.cn
+Cong Li
+Peking University
+Beijing, China
+leesou@pku.edu.cn
+Yihan Yin
+Peking University
+Beijing, China
+yyhsess2021@stu.pku.edu.cn
+Dimin Niu
+Alibaba Group Inc.
+Hangzhou, China
+dimin.niu@alibaba-inc.com
+Guangyu Sun
+Peking University
+Beijing, China
+gsun@pku.edu.cn
+Abstract
+Deploying Video Diffusion Models (VDMs) on edge devices is ap-
+pealing for localized and privacy-preserving generation, but their
+iterative Transformer-based denoising remains too slow for practi-
+cal local inference. Cross-Timestep Caching (CTC) has emerged as
+a promising direction for reducing redundant computation, reusing
+activations across adjacent denoising steps rather than modify-
+ing model weights, while largely preserving generation fidelity.
+However, on memory-constrained edge GPUs, CTC requires a mas-
+sive cache footprint that quickly exceeds on-device VRAM and
+forces the cache into host memory. More fundamentally, cache
+operators remain tightly interleaved and chain-dependent with
+native compute operators, so naive near-memory offloading still
+incurs repeated PCIe exchanges for residual and fusion computa-
+tions, turning cache reuse into a communication- and serialization-
+bound execution flow. We therefore propose CODA, an algorithm-
+hardware co-designed architecture centered on Compute-Cache
+Operator Disaggregation. CODA separates dense compute paths
+and memory-bound cache paths across the xPU and a lightweight
+DIMM-side near-memory engine, reorganizes fragmented cache
+activity into hardware-friendly coalesced segments, and exploits
+Classifier-Free Guidance (CFG) branch independence to overlap
+xPU compute with cache-side execution. Experiments show that
+CODA achieves up to 1.80× end-to-end speedup and 1.74× higher
+energy efficiency, while preserving competitive generation quality
+compared with a state-of-the-art caching algorithm.
+Keywords
+Video Diffusion Model, Near-Memory Processing
+MICRO 2026, Athens, Greece
+2026. ACM ISBN 978-X-XXXX-XXXX-X/XX/XX
+https://doi.org/XXXXXXX.XXXXXXX
+1
+Introduction
+Recent Video Diffusion Models (VDMs), exemplified by ByteDance
+Seedance 2.0 [29] and OpenAI Sora 2 [55], have substantially im-
+proved the fidelity and physical consistency of video generation,
+making them an important foundation for digital content creation [5,
+14, 27, 69, 70]. As deployment scenarios broaden and representative
+models continue to mature and become open-source [27, 39, 65, 70],
+extending video generation from the cloud to edge devices such as
+GPU-equipped workstations becomes increasingly attractive for of-
+fline availability and privacy preservation [24, 33, 74, 75]. However,
+their iterative denoising process over heavy transformers still incurs
+high inference latency. Existing model compression methods, such
+as quantization [9, 19] and pruning [3, 37, 72], can reduce computa-
+tion, but often require costly fine-tuning for recovery [12, 59, 71].
+Prior studies [15, 61, 73, 78] have observed strong feature-map
+similarity between adjacent denoising timesteps, motivating Cross-
+Timestep Caching (CTC) [43, 44, 67], which reuses intermediate
+features from previous timesteps (e.g., outputs of Attention or FFN
+modules) to bypass redundant computation. By exploiting cross-
+timestep similarity rather than perturbing model weights or activa-
+tions, CTC remains orthogonal to conventional model compression
+and is particularly appealing for video generation. However, high-
+fidelity reuse requires caching a massive volume of intermediate
+features, and the cache footprint scales with model size, video reso-
+lution, and duration. For example, generating a 4-second 720p video
+with Open-Sora [76] requires more than 40 GB of cache storage, far
+beyond the typical VRAM capacity (∼24 GB) of high-end edge GPUs.
+Existing software stacks therefore offload cross-timestep cache to
+host memory (DRAM) [35, 46, 51, 64, 73]. Since cache operators
+have extremely low arithmetic intensity, fetching massive cached
+data over PCIe quickly makes them bandwidth-bound, creating a
+severe performance wall, as shown in Figure 1(a) and Figure 1(b).
+A natural idea is to offload these bandwidth-bound cache opera-
+tors to a Near-Memory Processing (NMP) subsystem [25, 28, 30, 56].
+However, this naive approach overlooks the strict serial depen-
+dencies in VDM execution. In existing CTC flows, native compute
+1
+arXiv:2607.14908v1  [cs.AR]  16 Jul 2026
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Yuanpeng Zhang et al.
+Compute Op on xPU (e.g. GPU)
+Cache Op on xPU (Ideal VRAM)
+Cache Op with Offloading
+(Bound in PCIe Communication)
+(Hidden) CODA PCIe Communication
+Baseline 
+(w/o cache)
+Ideal Acc w cache
+(Unlimited VRAM)
+Cache Offload
+to Host Memory
+CODA (Ours)
+(Overlapped Ops)
+Most latencies 
+are HIDDEN
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Normalized Latency
+Substantially reduced 
+exposed overhead
+Actual  acceleration
+with cache offloading
+CODA 
+Acc.
+(a) Latency breakdown: caching reversal on edge devices
+(Exposed) CODA PCIe/NMP Overhead
+(Hidden) CODA NMP Op
+Centralized 
+Processor
+GPU
+Intermediate 
+(Activations)
+VRAM (e.g. GDDR6)
+Cache-0
+Cache-1
+Cache-2
+Cache-3
+Cache-4
+Cache-5
+Host Mem (e.g. DDR4)
+❶
+❷
+RAM
+Centralized 
+Processor
+GPU
+Intermediate 
+(Activations)
+Weights
+Results
+VRAM (e.g. GDDR6)
+Cache-0
+Cache-1
+Cache-2
+Cache-3
+Cache-4
+Cache-5
+Host Mem (with DIMM-NMP)
+RAM
+(c) Compute-cache disaggregation with CODA DIMM-NMP subsystem
+NME
+Weights
+Results
+Cache-5
+❸
+❶❷
+(~1TB/s)
+PCIe bottleneck 
+leads to xPU 
+underutilization
+
+❶
+❷
+Results
+❷
+❶
+❶
+Compute-cache 
+disaggregation for
+better xPU use 
+
+(b) Cross-Timestep Caching with host-memory offloading
+PCIe 4.0 (~64GB/s, aggregate)
+PCIe 4.0(~64GB/s, aggregate)
+
+Figure 1: Motivation and solution overview. (a) Host memory cache offloading can erase expected CTC gains on edge devices,
+while CODA substantially reduces end-to-end latency by hiding exposed cache-path overhead (xPU is NVIDIA RTX 4090 GPU).
+(b) Limited VRAM pushes overflow cache to host DRAM, making the cache path PCIe-bound and lowering xPU utilization. (c)
+CODA disaggregates cache operators to lightweight DIMM-NMP and overlaps cache-side execution with xPU compute.
+operators and cache operators remain tightly interleaved, and re-
+sults produced by one side are often immediately required by the
+other. As a result, NMP execution cannot proceed independently
+and must repeatedly exchange intermediates with the xPU across
+PCIe for residual and fusion computations. As discussed in Sec-
+tion 3.3, this back-and-forth communication leads to 2× PCIe traffic
+amplification in the worst case, largely negating the performance
+gain of caching. Once cache overflow occurs, the key bottleneck
+is therefore no longer only redundant computation, but also the
+communication and serialization overhead introduced by the cache.
+To address this bottleneck, we propose CODA, an algorithm-
+hardware co-designed Compute-Cache Operator Disaggregation
+architecture. CODA keeps compute-intensive operators (compute
+operators) on the high-throughput xPU while offloading capacity-
+critical, bandwidth-bound cache operators to a specialized NMP
+subsystem, as reflected in Figure 1(c). On top of this physical dis-
+aggregation, CODA uses a static-dynamic hybrid hardware-aware
+scheduler to reorganize fragmented cache activity into coalesced
+segments, reducing fine-grained compute-cache interleaving and
+cross-PCIe communication. It further exploits the independence
+between the two Classifier-Free Guidance (CFG) branches to over-
+lap xPU compute with cache-side execution, thereby reducing ex-
+posed overhead and end-to-end latency. Through this cross-stack
+co-design, CODA turns cross-timestep caching from nominal algo-
+rithmic reuse into real end-to-end system gains on edge platforms.
+In summary, this paper makes the following contributions:
+• Hybrid Hardware-Aware Caching Scheduler: We propose a
+scheduler that reorganizes fragmented cache activity into coa-
+lesced segments, reducing fine-grained compute-cache interleav-
+ing and cross-interface communication. We further introduce
+Dynamic Runtime Adjustment to safeguard rare volatile cases.
+• Lightweight DIMM-NMP Architecture: We design a light-
+weight DIMM-side NMP subsystem that enables compute-cache
+operator disaggregation by executing memory-bound cache op-
+erators near memory with minimal hardware overhead.
+• CFG-Interleaved Pipelining: We exploit CFG branch indepen-
+dence to overlap xPU compute with cache-side execution, thereby
+hiding exposed communication and NMP latency.
+Extensive experiments demonstrate that CODA achieves up to
+1.80× end-to-end speedup and 1.74× higher energy efficiency, while
+incurring minor quality degradation over the SOTA baseline [73].
+2
+Background
+2.1
+Video Diffusion Models (VDMs)
+As the generation fidelity of Video Diffusion Models (VDMs) [16,
+27, 29, 55] continues to improve, deploying them on edge devices
+for offline availability and privacy-preserving inference has become
+increasingly attractive [24, 33, 74, 75]. However, this high fidelity
+relies on Diffusion Transformers (DiTs) [49, 57, 76]. As illustrated
+in Figure 2 (left), mainstream DiT architectures employ alternating
+Spatial and Temporal Transformers to process complex 3D spatial-
+temporal tokens. Because it is stateless across different iterative
+denoising steps, the DiT must execute extremely dense GEMM
+operators at every single step. This extreme compute-bound charac-
+teristic leads to very long generation latency at the edge [21, 65, 76].
+2.2
+Cross-Timestep Caching (CTC)
+To reduce redundant computation in iterative denoising, prior
+works have proposed Cross-Timestep Caching (CTC) [11, 15, 40,
+41, 43, 44, 48, 61, 67, 73, 78]. As shown in Figure 2 (right), CTC ex-
+ploits feature-map similarity between adjacent denoising timesteps
+by caching the outputs of selected operators from the previous
+timestep and reusing them. The “operator” refers to a module-level
+computation unit such as Attention or FFN. It includes primitive
+kernels such as LayerNorm, GELU, and Softmax inside the corre-
+sponding module, rather than treating these primitive kernels as
+separate cache operators. Importantly, cache reuse does not imply
+that an entire operator is completely skipped. Instead, it replaces
+the original compute-intensive GEMM operators with cache oper-
+ators dominated by data retrieval and lightweight fusion. These
+operators typically fetch cache from storage, perform element-wise
+operations with lightweight features in the current branch (e.g.,
+2
+
+CODA: Algorithm-Hardware Co-design for Edge Video Diffusion
+via NMP-Enabled Compute-Cache Operator Disaggregation
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+3
+Frame(1)
+Frame(m)
+...
+Token(1)
+Token(n)
+...
+Token(1)
+Token(n)
+...
+Frame(1)
+Frame(m)
+...
+Tokenizing & Embedding
+Temporal transformer
+Reshape
+Spatial transformer
+DiT Block 1
+DiT Block 2···N
+Timestep - 1
+Label &
+ Timestep
+1
+1
+2
+3
+4
+1
+2
+3
+4
+1
+2
+3
+4
+Patchified Video
+Label &
+ Timestep
+Timestep i
+Spatial Attn.
++
+Scale & Shift
+Gate
+Cross Attn.
++
+Gate
+FFN
++
+Gate
+Temporal Attn.
++
+Scale & Shift
+Gate
+Cross Attn.
++
+Gate
+FFN
++
+Gate
+Timestep i-1
+Spatial Attn.
++
+Scale & Shift
+Gate
+Cross Attn.
++
+Gate
+FFN
++
+Gate
+Temporal Attn.
++
+Scale & Shift
+Gate
+Cross Attn.
++
+Gate
+FFN
++
+Gate
+Cache
+[ffn1][k]
+Cache
+[AttnS][k]
+Cache
+[AttnC1][k]
+Cache
+[ffn2][k]
+Cache
+[AttnT][k]
+Cache
+[AttnC2][k]
+Figure 2: DiT blocks of VDMs (left). Cross-Timestep Caching,
+which replaces selected operators with a cache path (right).
+residual addition, scaling, or gated fusion), and then pass the up-
+dated features to subsequent serial operators. Therefore, while CTC
+reduces computation, it also shifts the corresponding execution
+toward a more memory-bandwidth-intensive pattern.
+2.3
+Classifier-Free Guidance (CFG)
+To improve fidelity and alignment between generated outputs
+and text prompts, modern VDMs widely adopt the Classifier-Free
+Guidance (CFG) [2, 6, 20, 53, 76]. At each denoising timestep, the
+model executes two full branches in parallel: a conditional branch
+(𝜖𝑐𝑜𝑛𝑑) and an unconditional branch (𝜖𝑢𝑛𝑐𝑜𝑛𝑑). At the end of that
+timestep, after both branches have completed the forward execu-
+tion of all Transformer blocks, the system fuses their outputs using:
+𝜖= 𝜖𝑢𝑛𝑐𝑜𝑛𝑑+ 𝑤· (𝜖𝑐𝑜𝑛𝑑−𝜖𝑢𝑛𝑐𝑜𝑛𝑑) where 𝑤is the guidance scale
+factor. The fused tensor serves as the timestep denoising result.
+In existing implementations, these two branches are typically
+packed into a batch (size = 2) and submitted together to the GPU [10,
+36, 58, 60]. However, before reaching this fusion point, their com-
+putations within a timestep are data-independent from each other.
+2.4
+Near-Memory Processing (NMP)
+Near-Memory Processing (NMP) is a promising architectural para-
+digm that reduces data movement by pushing computation closer to
+where data resides [1, 17, 22, 34, 38, 45, 56, 77]. Existing NMP archi-
+tectures are broadly divided by where compute logic is physically
+deployed. Intra-DRAM designs (e.g., bank- or bank-group-level) in-
+tegrate logic inside the DRAM die, close to sense amplifiers or bank
+I/O. Such designs exploit the extremely high internal bandwidth of
+DRAM but usually rely on customized DRAM processes and thus
+face stronger area and thermal constraints, as exemplified by UP-
+MEM [18] and SK Hynix AiM [31]. Extra-DRAM designs (e.g., rank-
+or channel-level) instead place lightweight compute logic near the
+module buffer/register chip or memory controller without modify-
+ing the memory die. They are less intrusive to commodity memory,
+preserve the capacity advantage of commodity DRAM, and still
+provide high aggregated bandwidth. Representative DIMM-NMP
+systems include Samsung AxDIMM [30] and RecNMP [25], which
+accelerate large-capacity, low-arithmetic-intensity, memory-bound
+workloads such as data analytics [26] and LLM decoding [32].
+3
+Motivation and Key Insight
+3.1
+The Capacity and Bandwidth Crisis of CTC
+Cross-Timestep Caching is fundamentally a space-for-time tradeoff,
+but its cache overhead is substantial. As analyzed in Figure 3(a), the
+cache volume grows with video resolution and frame count. Even
+generating a 480p, 2-second video can already exceed the VRAM of
+a typical high-end edge GPU (e.g., 24 GB on an NVIDIA RTX 4090),
+making it difficult to keep the full cache on device [27, 62, 64, 70].
+Existing systems therefore typically place overflow cache in host
+DRAM. This relieves the on-device capacity constraint but shifts
+the CTC bottleneck to data movement and serialized cache-path
+execution. Figure 3(b) illustrates several serial operators within
+a cache-enabled timestep. CTC reuses cached outputs from the
+previous timestep and bypasses original computation, yet each
+cache operator still fetches the cache from host DRAM over PCIe
+and performs lightweight residual/scaling/fusion on the xPU before
+following operators proceed. Because these cache operators have
+very low arithmetic intensity, PCIe transfer latency can offset the
+benefit of skipping dense computation and may cause the host-
+offloading performance reversal shown in Figure 1(a).
+3.2
+Heterogeneous Operator Cacheability
+Our profiling results and prior CTC studies [61, 73, 78] commonly
+observe that different operator types have different sensitivity to
+cross-timestep reuse. For example, Cross-Attention is often more
+stable across adjacent denoising timesteps, whereas FFN and some
+Spatial/Temporal Attention operators can be more sensitive to reuse
+error. As a result, CTC policies that focus on algorithm-level het-
+erogeneous cacheability typically assign different caching aggres-
+siveness to different operator types or network locations.
+Although such operator-aware policies help control generation-
+quality loss, they naturally create an interleaved execution pattern.
+Using the cache-enabled execution interval in Figure 3(b)(c) as an
+example, Cross-Attentions are turned into cache operators, while
+neighboring operators remain on the native xPU compute path,
+forming an execution chain with interleaved dependencies between
+the compute path and the cache path. This interleaving is common
+in CTC execution, but it also exposes a limitation: cache operators
+are still sandwiched between dependent compute operators, divid-
+ing the execution flow into fine-grained communication boundaries.
+3.3
+The Pitfalls of Naive NMP Offloading
+Cache operators are typical bandwidth-bound operators: they fre-
+quently access large cached tensors, while their local computation
+mainly consists of lightweight element-wise operations. Therefore,
+a natural and necessary solution is to introduce a lightweight NMP
+substrate that provides an execution space for these memory-bound
+cache operators close to the cache storage. This near-memory exe-
+cution substrate forms the hardware foundation for compute-cache
+operator disaggregation, enabling the cache path to be separated
+from the dense xPU compute path and providing the necessary
+condition for independent scheduling and overlapped execution.
+3
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Yuanpeng Zhang et al.
+xPU
+timeline
+… Spatial-
+Attn
+Cross-
+Attn
+FFN
+Tempor
+al-Attn
+Cross-
+Attn
+PCIe
+Host
+DRAM
+…
+…
+…
+Cached tensors Cs (outputs from previous timestep)
+Compute operator (each includes multiple computation)
+Cache operator (retrieval + residual/scale/fuse)
+PCIe transfer
+xPU
+timeline
+… Spatial-
+Attn
+Wait for R
+FFN
+Tempor
+al-Attn
+Wait…
+DIMM-
+NMP
+…
+Cached 
+tensor Ci
+Cached 
+tensor Cj
+Cached 
+tensor Ci
+Cache 
+fusion
+Cache 
+operator
+Attention operator
+(e.g., Spatial-Attn)
+QK
+Softmax
+SV
+Proj
+FFN operator
+Linear
+GELU
+0
+10
+20
+30
+40
+50
+60
+360p×2s
+360p×4s
+480p×2s
+480p×4s
+720p×2s
+720p×4s
+24GB (NVIDIA RTX 4090)
+A majestic time-lapse of sunrise over snow-capped 
+mountains. 
+Prompt:
+Cache Out 
+of Memory!
+Weight Storage
+Cross-Timestep Cache
+Intermediate (Activations)
+(a) Memory footprint scaling of Open-Sora
+(b) Execution timeline of host-offloaded CTC
+…
+(c) Execution timeline of CTC with naive NMP offloading
+Cache 
+operators
+heterogeneous cacheability leads to interleaving
+traffic
+|C|
+PCIe
+traffic
+|A|
+traffic
+|R|
+Less-sensitive, 
+using cache to
+skip computation
+Figure 3: Motivation and insight. (a) Cache storage quickly exceeds edge-GPU VRAM as video size grows. (b) With host-offloaded
+CTC, the xPU fetches cached tensors from host DRAM and performs the cache-side residual/scaling/fusion locally. (c) With
+naive NMP offloading, the current activation must be sent to the DIMM-NMP and the fused result must return to the xPU
+before downstream compute operators can continue, causing repeated PCIe transfers and stop-and-wait serialization.
+However, naive NMP offloading only changes where each cache
+operator is executed; it does not change the interleaved depen-
+dency structure described above. As shown in Figure 3(c), an of-
+floaded cache operator is still placed between adjacent xPU compute
+stages. Downstream compute can continue only after the memory-
+side fusion finishes and returns the result to the xPU. Therefore,
+although NMP provides the execution substrate for cache-
+side execution, fine-grained serial dependencies still hinder
+compute-cache operator disaggregation.
+This fine-grained coupling also amplifies cross-interface traffic.
+In host-offloaded CTC, the xPU mainly fetches the cached tensor 𝐶
+over PCIe. Naive NMP instead makes each cache operator send the
+current activation 𝐴to the DIMM-NMP and return the fused result
+𝑅. Since 𝐴, 𝑅, and 𝐶are typically comparable in size, this round trip
+can offset the benefit of near-memory execution. This motivates
+CODA to use a coarser cache-path granularity, amortizing one
+activation/result round trip across multiple cache operators instead
+of repeating it at every operator boundary.
+Another implication is exposed critical-path latency. Naive NMP
+removes lightweight cache fusion from the xPU, but the xPU still
+waits at each cache-operator boundary before downstream dense
+computation can proceed. The added PCIe round trip and synchro-
+nization can outweigh the saved lightweight-operation time. CODA
+therefore needs to reorganize execution so that cache-side execu-
+tion overlaps with dense xPU computation, rather than merely
+moving cache fusion closer to memory.
+4
+CODA Design
+4.1
+CODA Overview and Execution Flow
+4.1.1
+Cross-Stack Synergy.
+As illustrated in Figure 4, CODA is organized around compute-
+cache operator disaggregation. It begins with the Hybrid Hardware-
+Aware Caching Scheduler, which makes the originally inter-
+twined execution flow explicit by separating it into a compute
+path and a cache path, while reorganizing the latter into coarse-
+grained coalesced cache segments to amortize communication over-
+head. This separation enables a clean hardware mapping, in which
+compute-intensive dense operators remain on the centralized xPU,
+    Diffusion Model
+ Classifier-Free Guidance
+(CFG)
+    Conditional Batch
+   Unconditional Batch
+Compute Operator Path
+Cache Operator Path
+PCIe
+Algorithm
+Software
+Level
+Hardware
+Architecture
+Level
+3.CFG-Interleaved Pipelining
+Latency
+masking
+Execution 
+Dataflow
+Coalesced Segments
+2.Lightweight DIMM-NMP 
+     (Executing Cache Ops)
+ Centralized xPU
+(Executing Compute Ops) 
+1.Hybrid Hardware-Aware Caching Scheduler
+Compute-Cache Operator Disaggregation
+Shadow Monitoring
+Offline Profiling           
+Segmentation
+Figure 4: CODA overview and cross-stack synergy.
+while memory-bound cache operators are assigned to the Light-
+weight DIMM-NMP. Importantly, this near-memory subsystem is
+intentionally streamlined for the low-arithmetic-intensity access
+and fusion patterns of cache operators, providing a low-overhead
+execution substrate for the disaggregated cache path. Building on
+this separation and mapping, CFG-Interleaved Pipelining ex-
+ploits the independence of the two CFG branches before final fusion,
+allowing the cache-side DMA/NMP execution of one branch to over-
+lap with the xPU dense computation of the other. In this way, the
+remaining communication and processing costs of the cache path
+can be largely hidden behind the xPU compute window.
+4.1.2
+End-to-End Execution Walkthrough.
+Figure 5 illustrates the execution flow of CODA within a cache-
+enabled timestep. The top row shows the operator order in the
+current timestep. CODA scheduler combines operator cacheability
+with hardware cost to adjust the cache policy and form coalesced
+cache segments for cache-side execution. These segments read
+cached tensors produced by previous timesteps, but the segment
+does not cross timestep boundaries, because CFG must synchronize
+the two branches and perform fusion at the end of each timestep.
+When execution enters a coalesced cache segment, the xPU no
+longer offloads each cache operator separately. Instead, it sends the
+4
+
+CODA: Algorithm-Hardware Co-design for Edge Video Diffusion
+via NMP-Enabled Compute-Cache Operator Disaggregation
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+xPU
+timeline…
+PCIe
+DIMM-
+NMP
+Spatial-Attn
+(con)
+Spatial-Attn
+(uncon)
+Cache Op Segment
+(con)
+FFN Tempor
+al-Attn
+Cross-
+Attn
+previous Segment
+(uncon)
+FFN
+Cross-
+Attn
+…
+…
+Cross-Attn
+(con)
+FFN Tempor
+al-Attn
+Cross-
+Attn
+Cache Op Segment 
+(uncon)
+…
+Order 
+of Ops
+…
+FFN
+Cross-
+Attn
+…
+previous Segment
+Spatial
+-Attn
+FFN Tempor
+al-Attn
+Cross-
+Attn
+Cross-
+Attn
+…
+current Segment
+next…
+…
+CFG overlap
+within a
+timestep
+traffic
+Acon
+traffic
+Rcon
+traffic
+previous Runcon
+traffic
+next Acon
+Figure 5: CODA execution walkthrough. Coalesced segments
+are formed within a timestep, execute cache-side operators
+on DIMM-NMP, and overlap with dense xPU computation
+on the other CFG branch before timestep-level CFG fusion.
+current activation to the DIMM-NMP through PCIe at the segment
+boundary. The DIMM-NMP then reads the corresponding cached
+tensors from memory and executes the segment’s cache retrieval,
+residual/scale/fusion operations on the memory side. After the
+segment finishes, the fused result is returned to the xPU and the
+dependent downstream compute operators continue. In this way,
+activation/result transfers are consolidated at segment boundaries,
+amortizing PCIe communication and synchronization overhead.
+CODA further hides cache-side latency through CFG execution.
+Within a denoising timestep, the conditional and unconditional
+branches are independent before final CFG fusion. Thus, while one
+branch’s coalesced cache segment runs on the NMP, the xPU can
+advance dense computation on the other branch. The branches syn-
+chronize only after all operators in the timestep finish, when CFG
+fusion produces the final denoising output. This walkthrough sets
+the semantics used below: the scheduler forms coalesced segments,
+NMP executes them near memory, and CFG-interleaved pipelining
+overlaps cache-side execution with xPU dense computation.
+4.2
+Hybrid Hardware-Aware Caching Scheduler
+CODA’s hardware-aware caching scheduler extends prior CTC
+cache policies from reuse selection to hardware-aware execution
+planning. Prior CTC methods [61, 73] choose reusable timesteps
+and operators for quality-preserving computation reduction. CODA
+uses the operator-instance similarity profile, which captures the
+above operator/timestep differences as well as the backbone-depth
+variation revealed by our profiling in Figure 6(c), and weighs it
+together with xPU-DIMM communication and DIMM-NMP exe-
+cution/overlap costs. The scheduler therefore determines cached
+operator instances and the resulting coalesced segment boundaries
+offline, while runtime only applies lightweight corrections when
+an input deviates from the offline profile.
+4.2.1
+Static Profiling-Based Scheduling Policy.
+Given the profiled operator sequence of each model, CODA
+searches cache decisions offline, treating each operator instance
+as a candidate. Consecutive selected candidates within the same
+timestep form coalesced cache segments, and the remaining xPU
+operators separate these segments to define xPU-DIMM commu-
+nication boundaries. This reduces fine-grained PCIe transactions
+while controlling generation-quality loss.
+Cacheability quantification for scheduling. For static policy,
+CODA profiles each model with 10 representative prompts before
+inference and measures each operator instance’s normalized output
+L1 similarity across adjacent denoising timesteps. The averaged
+profile is used as the offline cacheability signal because cacheabil-
+ity mainly reflects model-structural factors such as operator type,
+timestep, and network depth and is relatively stable across inputs.
+For rare outlier inputs, Dynamic Runtime Adjustment checks run-
+time feature evolution and applies a more conservative cache policy.
+Coalesced segmentation. Based on the cacheability signal above,
+the scheduler searches for a static cache policy 𝑆. A coalesced seg-
+ment is a continuous sequence of cache operators within the same
+timestep that is packed and offloaded to the NMP as a single transac-
+tion and executed in the original dependency order. Its key benefit
+is to reduce fine-grained interleaving between compute operators
+and cache operators: instead of incurring PCIe communication for
+every cached operator, the system communicates mainly at the
+input and output boundaries of each segment. To jointly balance
+reuse benefit and execution overhead, the scheduler determines
+this static policy 𝑆by minimizing the following objective:
+𝐸(𝑆) = 𝑤𝑐𝑜𝑠𝑡·
+∑︁
+Cost(𝑆) + 𝑤𝑓𝑟𝑎𝑔· Fragment(𝑆)
+(1)
+where Cost(𝑆) captures the fidelity risk of the cached operator
+instances selected by 𝑆. For each cached operator, we use the pro-
+filed average cross-timestep output instability (implemented as
+1−Similarity𝐿1) as a proxy for the error introduced by replacing na-
+tive computation with caching, and accumulate it over the operators
+covered by the plan. In contrast, Fragment(𝑆) penalizes both overly
+fragmented segments and segments whose execution latency devi-
+ates from the hardware-preferred pipeline window 𝑇𝑜𝑝𝑡𝑖𝑚𝑎𝑙(which
+is further explained in Section 4.4):
+Fragment(𝑆) =
+𝑘
+∑︁
+𝑖=1
+ 𝐶𝑐𝑜𝑚𝑚+ 𝑤𝑑𝑒𝑣· max(0,𝑇𝑒𝑥𝑒𝑐(𝑆𝑖) −𝑇𝑜𝑝𝑡𝑖𝑚𝑎𝑙)
+(2)
+𝐶𝑐𝑜𝑚𝑚denotes the base communication overhead of a single PCIe
+transaction, which naturally discourages excessively fragmented
+segments, and 𝑇𝑒𝑥𝑒𝑐(𝑆𝑖) is the estimated execution latency of seg-
+ment 𝑆𝑖on the NMP. The objective therefore jointly constrains
+two risks: overly aggressive caching that may harm generation
+quality, and overly fragmented or pipeline-misaligned segments
+that undermine system efficiency. These weights are tunable across
+models and policy preferences. By default, CODA uses 𝑤𝑐𝑜𝑠𝑡= 3,
+𝑤𝑓𝑟𝑎𝑔= 0.8, and 𝑤𝑑𝑒𝑣= 1, where 𝑤𝑐𝑜𝑠𝑡favors lower reuse-risk
+operators, 𝑤𝑓𝑟𝑎𝑔favors fewer and longer segments, and 𝑤𝑑𝑒𝑣pe-
+nalizes segments exceeding the CFG-overlap window. Since the
+search space over cache decisions and induced segment boundaries
+is non-convex, we use simulated annealing [63] to optimize the
+cache decisions and generate an offline static schedule for each
+model. In our implementation, the target cache ratio controlling
+overall caching aggressiveness is set to 25%~50% by default depend-
+ing on the model. Simulated annealing uses 300K~500K proposals
+per model, an initial temperature of 1.0, a cooling factor of 0.995
+every 1K proposals, and early stopping after 20K proposals without
+objective improvement. Because the search only uses profiled sta-
+tistics and analytical latency estimates, it finishes in minutes as a
+one-time offline cost and does not affect the inference critical path.
+5
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Yuanpeng Zhang et al.
+Spatial
+Attn 0~27
+Temporal
+Attn 0~27
+Spatial Cross-
+Attn 0~27
+Temporal 
+Cross-Attn 
+0~27
+Spatial 
+FFN 0~27
+Temporal 
+FFN 0~27
+Higher
+Similarity
+(Normed)
+Op Sensitivity
+(Output Difference)
+Diffusion Timestep
+FFN
+Spatial-Attn
+Cross-Attn
+Temporal-Attn
+Different stable
+diffusion stages
+Op Sensitivity
+(Output Difference)
+Transformer Block ID
+Less cache in middle 
+transformer blocks
+(b)
+Timestep index
+(a)
+3
+5
+7
+9
+11
+13
+15
+17
+19
+21
+23
+25
+27
+29
+1
+0.2
+0.4
+0.6
+0.8
+1.0
+0.0
+(c)
+Figure 6: Spatial-temporal heterogeneity of cacheability: (a)
+Cross-timestep output stability (L1 similarity) profiling of
+different operators in Open-Sora [76] (Normalized across all
+timesteps for each op). (b) Relative operator sensitivity across
+diffusion timesteps: FFN>Spatial>Temporal>Cross. (c) Oper-
+ators in the middle blocks are generally more sensitive than
+operators of the same type near either end of the network.
+4.2.2
+Dynamic Runtime Adjustment.
+Although the static policy covers the vast majority of inputs,
+real-world inference may still encounter a small number of prompts
+whose early-step feature evolution deviates noticeably from the
+offline profiling pattern, making the planned caching start point
+overly aggressive. To handle such cases, CODA introduces an asyn-
+chronous runtime safeguard on top of the static schedule to validate
+the planned cache-entry point before entering the caching phase.
+Shadow monitoring. This mechanism exploits a natural system
+window. During the high-noise early denoising stage, feature vari-
+ation is typically too large for caching to be safely enabled, so the
+NMP remains idle while the xPU continues along the native ex-
+ecution path. We use this window to asynchronously offload the
+output features of timesteps 𝑡+ 2 and 𝑡+ 1 to the NMP before the
+scheduled caching start step 𝑡, and compute their L1 distance in
+the background. Because this check is decoupled from the main
+execution path, it introduces no exposed latency on the critical path
+and serves as a lightweight shadow monitor.
+Fixed-step fallback. If the measured distance exceeds a prede-
+fined safety threshold, the runtime interprets it as a signal that the
+operator remains too unstable near the current cache-entry point
+to safely enter the caching phase. In that case, the host runtime
+temporarily disables caching for that operator and falls back to
+native xPU execution for 𝑁fb nearby denoising timesteps (typically
+𝑡and 𝑡−1). We adopt this fixed-step fallback instead of continuous
+online monitoring because it is sufficient to cover the common
+instability cases around cache entry while avoiding the additional
+control complexity, storage-access interference, and hardware over-
+head of continuous monitoring. In this way, DRA preserves the
+efficiency of the static schedule in the common case while providing
+a low-overhead runtime correction for rare volatile inputs.
+4.3
+CODA Architecture and NMP Subsystem
+To efficiently execute the coarse-grained cache plans generated by
+the scheduler in the previous section, CODA requires a hardware
+substrate that supports both operator disaggregation and stream-
+ing data organization. This section presents the overall system
+architecture of CODA, the NMP microarchitecture tailored to cache
+operators, and the execution dataflow that remains compatible with
+modern memory protocols.
+4.3.1
+System Architecture and Design Rationale.
+As shown in Figure 7(a), CODA adopts a heterogeneous exe-
+cution framework based on compute-cache disaggregation. The
+xPU serves as the centralized compute engine and executes the
+compute-intensive dense operators in the DiT backbone, while the
+memory-bound cache operators are mapped to the DIMM-NMP sub-
+system, where they are executed on the memory side and interact
+with the xPU only at segment boundaries.
+CODA adopts the rank-level, center-buffer-based extra-DRAM
+NMP shown in Figure 7(b)(c) as a balanced design point for cache-
+path disaggregation. This choice reflects the cost-benefit tradeoff:
+providing an independent cache-side execution space without in-
+troducing complex control or intrusive DRAM-die modifications,
+while keeping its latency largely hidden by dense xPU computation.
+First, the rank-level organization better matches CODA’s tiled
+multi-stream fusion flow with lower integration complexity. For
+each tile group, the NME coordinates the incoming activation
+stream with multiple aligned cache streams (𝐶1, . . . ,𝐶𝑛) and ap-
+plies the fused operations in order. Placing this coordination at the
+rank-level center buffer avoids introducing fine-grained bank-local
+controllers, strict stream co-location constraints, or cross-bank par-
+tial movement and synchronization. It also preserves a commodity-
+DIMM-like organization without modifying DRAM dies, reducing
+area, thermal, verification, and integration costs.
+Second, rank-level NMP is sufficient for CODA’s cache-path
+execution. For a coalesced segment, increasing internal DRAM
+bandwidth mainly shortens tiled fusion in the NME, while segment-
+boundary activation/result transfers and synchronization remain.
+In our evaluated configuration, tiled fusion is less than 20% of esti-
+mated cache-path latency for common segment lengths 𝑛= 2/3/4,
+so Amdahl’s Law limits the gain from replacing the rank-level
+NME with near-bank NMP. Our evaluation (Section 5.4) further
+shows that the remaining PCIe/NMP overhead can be largely hid-
+den behind xPU computation. Thus, near-bank PIM is an optional
+more aggressive design point, with limited extra end-to-end benefit
+relative to its hardware and control complexity.
+4.3.2
+NMP Microarchitecture.
+Based on the above architectural choice, CODA further stream-
+lines the NME microarchitecture according to the characteristics
+of cache operators. As shown in Figure 8(b), these operators are
+fundamentally dominated by element-wise scaling and fusion, and
+we therefore adopt a SIMD Processing Element (PE) tailored to
+this execution pattern. In Figure 8(b), 𝑚denotes the number of
+6
+
+CODA: Algorithm-Hardware Co-design for Edge Video Diffusion
+via NMP-Enabled Compute-Cache Operator Disaggregation
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Buffer Chip (NME)
+C/A
+DQ
+Rank1
+DRAM
+DRAM
+DRAM
+DRAM
+Rank0
+DRAM
+DRAM
+DRAM
+DRAM
+DIMM-NMP 0
+(a)
+Physical Layer & Arbiter
+DQ
+Rank0 Rank1
+Rank0 Rank1C/A
+DQ/CA Buffer
+Tensor
+Buffer
+Cache Operator 
+Execution Unit
+Inst. Decoder
+Controller
+DDR Physical Layer
+Interconnection
+DIMM Interface
+DIMM-NMP 1
+(b)
+(c)
+Compute Operators
+(together with 
+Cache Generation)
+Centralized Processor
+(xPU, etc.)
+Shared Mem.
+Compute 
+Core
+Compute 
+Core
+Host CPU
+Hybrid Caching
+Scheduler
+CFG-Interleaved
+Pipelining
+Memory Controller
+DIMM-NMPs
+DIMM-NMPs
+Memory (GDDR, etc.)
+Cache Operators
+& Shadow Monitoring
+Cache Offloading
+PCIe
+Newly added
+Figure 7: CODA architecture: (a) Compute-cache operator disaggregation between the xPU and DIMM-NMP subsystem. (b)
+Rank-level, buffer-chip-based DIMM-NMP organization. (c) Near-Memory Engine (NME) for cache-based diffusion operators.
+PEs in one NME, and we set 𝑚= 4 according to the DSE in Sec-
+tion 5.7. 𝑛denotes the number of cached tensors/operators fused
+within the current coalesced segment. Data entering the PE does
+not always follow a unified scale-and-fuse path. For gated fusion,
+the input first passes through a scalar multiplier, where it is multi-
+plied by a broadcast scaling factor, and is then fused through the
+floating-point adder. For the more common residual-only case, all
+scaling multipliers are uniformly bypassed, and the input data are di-
+rectly forwarded to the subsequent accumulation stage. Meanwhile,
+operand isolation clamps the multiplier inputs to stable constants
+to suppress redundant switching and reduce dynamic power.
+In addition to executing cache operators, this microarchitecture
+must also support the shadow monitoring mechanism introduced in
+the previous section. To this end, CODA reuses the existing datapath
+instead of introducing dedicated monitoring hardware. For DRA,
+the NME streams the two feature tiles to be compared through
+the PE lanes and bypasses the multiplier path. The augmented
+floating-point adder computes the element-wise difference and
+absolute value through sign-bit manipulation. The firmware then
+reorganizes the resulting difference vector and feeds it back to the
+same PE datapath, where the adder and registers perform tree-style
+accumulation to produce a local L1-difference scalar within each
+DIMM. Since the local computations are independent, the final
+global reduction can be directly handled by the host CPU when
+reading out the local scalars from all DIMMs. This scalar-level
+reduction scales only with DIMM count and is negligible compared
+with cache tensor movement. The reused datapath computation
+and final scalar aggregation run in the cache-entry shadow window
+and can be hidden by the xPU’s dense early-stage computation,
+adding no exposed critical-path latency. This monitoring occurs
+before cache is enabled, when early denoising features are unstable
+and unsuitable for cache reuse, so it does not run in parallel with
+cache operators and requires no separate NMP partition.
+4.3.3
+Firmware Execution: Tiled Operator-Fusion Dataflow.
+Although cache operators process large amounts of data, their
+execution pattern remains dominated by element-wise scaling and
+fusion rather than high-arithmetic-intensity matrix operations. This
+operator structure allows CODA to partition them consistently by
+spatial position and execute them in a streaming manner across
+DIMM-NMPs. At the same time, a single cache operator can still
+involve hundreds of megabytes of data, while the on-chip SRAM
+capacity inside the NME remains highly limited. CODA therefore
+adopts a tiled operator-fusion dataflow.
+As shown in Figure 8(a), within a coalesced segment, the runtime
+first performs DIMM-aligned partitioning along the spatial dimen-
+sion for both the input activation and the cached tensors from the
+latest reusable timestep, so that they are split at the same positions
+and mapped to different NMPs. Each DIMM therefore processes
+only its assigned input partition together with the aligned cache
+partitions for the 𝑛cache operators in the current coalesced seg-
+ment. Within each DIMM, these local partitions are further divided
+into aligned tile groups. Each tile group contains multiple contigu-
+ous SIMD-width chunks, where each chunk matches the PE-array
+width, i.e., 𝑚PEs × 8 lanes. The number of chunks in a tile group
+is selected according to the fusion depth 𝑛and the available NME
+buffer capacity (64 chunks in our evaluated configuration). During
+execution, the xPU first writes the partitioned input activation into
+DRAM through standard write requests, and the NME firmware
+then iterates over these aligned tile groups.
+Within a tile group, the firmware processes data chunk by chunk.
+For each SIMD-width chunk, the PE array loads the current activa-
+tion chunk into its lanes. It then streams the corresponding chunks
+from the aligned cache tiles in the original segment order. After
+each scaling, residual, or fusion update, the partial vector remains
+in the PE registers and is directly consumed by the next fused opera-
+tion. Only after all 𝑛cache operations for this chunk are completed
+is the final output chunk written to the Output Buffer. The firmware
+then advances to the next chunk in the tile group, and finally to
+the next tile group. After all tile groups are processed, the Output
+Buffer contains the final fused segment output to be returned to the
+xPU. CODA therefore avoids materializing full-tensor or full-tile
+intermediate results after every cache operator, reducing internal
+bandwidth overhead and unnecessary write-backs within the NME.
+The above tiled dataflow triggers concurrent accesses to multiple
+cache tiles within the inner loop. To reduce potential row/bank con-
+flicts caused by highly regular contiguous layouts under concurrent
+accesses, CODA further applies conflict-aware placement during
+tensor layout to decorrelate the low-level address mapping of cache
+tensors that are accessed together. Concretely, instead of chang-
+ing the logical tensor order, CODA assigns the 𝑛DIMM-local tiled
+cache tensors consumed by the same coalesced segment to different
+base regions or allocation offsets when possible. This reduces the
+7
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Yuanpeng Zhang et al.
+residual-
+bypass
+Reg
+Reg
+×
+×
+×
+×
+×8
+…
+scaling
+128b
+16b
+16b
+PE
+＋
+＋
+＋
+＋
+Reg
+Reg
+DIMM-K
+…
+DIMM-2
+…
+DIMM-1
+…
+…
+(a) DIMM-aligned partitioning
+Output Buffer
+scaling 
+factor
+𝐶𝑛,𝑘
+Input Buffer
+𝑠1
+×
+𝑠𝑛
+×
+…
+…
+…
+…
+…
+𝑚
+…
+＋
+tiled input latent
+…
+＋
+＋
+＋
+…
+…
+PE1
+PE2
+PE…
+PEm
+…
+𝐶n
+(b) Execution unit for cache operators 
+…
+＋
+＋
+＋
+＋
+𝐶1,𝑘
+𝐶1,2
+tiled cache
+Figure 8: (a) DIMM-aligned partitioning of the input activa-
+tion and cached tensors within a coalesced segment for paral-
+lel execution across DIMM-NMPs. (b) Streamlined execution
+unit and PE datapath for cache-based diffusion operators. (n
+is the coalesced segment length, and m is the number of PEs.)
+likelihood that their low-level bank/bank-group mappings align
+repeatedly under the memory-controller address mapping, while
+preserving the element-wise tiled execution order. This treatment
+is only an engineering layout strategy to support the tiled operator-
+fusion dataflow more robustly, rather than an independent method.
+4.4
+CFG-Interleaved Pipelining
+Figure 9 illustrates the execution evolution enabled by CODA. Fig-
+ure 9(a) shows the scheduler-only flow: after the Hybrid Hardware-
+Aware Caching Scheduler reorganizes fragmented cache operators
+into hardware-friendly coalesced segments, the cache path still
+executes through bandwidth-bound transfers and stalls the xPU.
+Figure 9(b) then maps these coalesced cache segments to the NMP.
+Compared with the scheduler-only flow in Figure 9(a), this naive
+“offload-and-wait” execution shortens the exposed communication
+span of cache processing, but the cache path and xPU compute
+still proceed in a serialized manner, leaving system-level pipeline
+bubbles. To remove this serialization bottleneck, CODA introduces
+CFG-Interleaved Pipelining, as shown in Figure 9(c).
+As discussed in Section 2.3, the conditional and unconditional
+branches of the CFG remain independent before the final fusion
+within each denoising timestep. CODA exploits this structure by
+breaking the bundled dispatch paradigm (Batch=2) used in exist-
+ing frameworks and unrolling it into two asynchronous execution
+streams at the system level. This split introduces a small kernel
+launch overhead and slightly reduces the computational density
+of each dispatch. Figure 9(c) reflects this effect: the computation
+block of a single branch is slightly longer than exactly half of the
+two-branch consolidated block in Figure 9(a). Nevertheless, this
+overhead is amortized by the resulting cross-branch overlap. This
+also gives the runtime enough separation to turn branch indepen-
+dence into a practical masking window to hide cache-side latency.
+In execution, the xPU first starts one CFG branch (the blue blocks
+in Figure 9(c)). To avoid waiting for an entire monolithic operator to
+finish before communication begins, CODA applies explicit macro-
+tiling to GEMM operators. For GPU instances, this macro-tiling
+exposes runtime-visible subGEMM boundaries. Once a subGEMM
+materializes its output tile in GPU memory, the runtime uses multi-
+stream asynchronous dispatch and event synchronization to launch
+𝑳𝒂𝟎
+[𝟎]&[1]
+𝑪𝒐𝒎𝟎[𝟎]
+𝑪𝒐𝒎𝟎[𝟏]
+𝑪𝒐𝒎𝟎
+[𝟎]
+𝑪𝒐𝒎𝟎
+[𝟏]
+𝑪𝒐𝒎𝟎[𝟎]
+𝑪𝒐𝒎𝟎[𝟏]
+𝑳𝒂𝟎
+[𝟎]
+𝑳𝒂𝟎
+[𝟏]
+𝑳𝒂𝟒
+[𝟎]
+𝑳𝒂𝟒
+[𝟏]
+𝑳𝒂𝟖
+[𝟎]
+𝑳𝒂𝟖
+[𝟏]
+𝑪𝒐𝒎𝟒[𝟎]
+𝑪𝒐𝒎𝟒[𝟏]
+𝑪𝒐𝒎𝟒[𝟎]
+𝑪𝒐𝒎𝟒[𝟏]
+𝑳𝒂𝟓
+[𝟎]&[1]
+𝑪𝒐𝒎𝟒
+[𝟎]
+𝑪𝒐𝒎𝟒
+[𝟏]
+𝑪𝒐𝒎𝟖
+[𝟎]
+𝑪𝒐𝒎𝟖
+[𝟏]
+𝑪𝒐𝒎𝟏𝟏
+[𝟎]
+𝑪𝒐𝒎𝟏𝟏
+[𝟏]
+xPU
+Computation
+Communication
+Two Batches 
+of CFG
+xPU
+Computation
+Communication
+NMP
+Computation
+Coalesced 
+Cache Segment
+…
+xPU
+Computation
+Communication
+NMP
+Computation
+…
+…
+Bandwidth-bound
+Cache Op
+…
+…
+Compute/Cache Op 
+Overlapping
+𝐶𝑜𝑚: compute         𝐿𝑎: latent intermediates         [0]/[1]: two CFG branches
+(a)
+(b)
+(c)
+Reduced communication
+Additional overlap gain
+Tile-level overlap 
+of xPU and DMA
+𝑳𝒂𝟑
+[𝟎]&[1]
+𝑳𝒂𝟏
+[𝟎]&[1]
+𝑳𝒂𝟐
+[𝟎]&[1]
+𝑳𝒂𝟑
+[𝟎]&[1]
+𝑳𝒂𝟑
+[𝟎]
+𝑳𝒂𝟑
+[𝟏]
+𝑳𝒂𝟕
+[𝟎]
+𝑳𝒂𝟕
+[𝟏]
+𝑳𝒂…
+[𝟎]
+Figure 9: CODA execution evolution: (a) Scheduler-only flow,
+where coalesced cache segments still stall the xPU through
+bandwidth-bound transfers. (b) Adding NMP offloading re-
+duces the communication span of the coalesced cache seg-
+ment, but the xPU remains idle during cache-path execution.
+(c) CFG-interleaved pipelining overlaps one branch with the
+other branch’s coalesced cache segment running on the NMP.
+the corresponding DMA without waiting for the entire GEMM to
+finish. This creates a tile-level pipeline between xPU execution
+and data movement. Meanwhile, after receiving the first data tiles,
+the NMP can immediately start its internal tiled operator-fusion
+dataflow, while the xPU proceeds to the other CFG branch (the
+orange blocks) instead of stalling on the cache path.
+These activities can overlap in time: downstream DMA for the
+current operator (xPU →NMP), upstream DMA for the preceding
+cache result (NMP →xPU), dense xPU computation, and cache-side
+NMP execution. More importantly, Figure 9(c) shows from 𝐶𝑜𝑚0
+to 𝐶𝑜𝑚4 that the NMP processes a continuous coalesced segment
+generated by the hybrid scheduler, rather than scattered cache oper-
+ators triggered one by one. Accordingly, this overlap is built directly
+on the coarse-grained cache reorganization in Section 4.2. Ideally, by
+the time the xPU finishes the other CFG branch, the NMP has also
+completed the corresponding coalesced segment, enabling a tight
+handoff between the two branches. Accordingly, the orange branch
+provides the xPU compute window that masks the cache segment
+opened by the preceding blue branch. Under this view, the target
+𝑇𝑜𝑝𝑡𝑖𝑚𝑎𝑙in the cost function of Section 4.2 represents the desired
+NMP masking window for this overlap. Specifically, the scheduler
+aims to keep the end-to-end NMP latency—including both bidirec-
+tional PCIe communication and internal NMP computation—within
+the xPU branch compute window as much as possible. When this
+condition is satisfied, the exposed serial waiting time in Figure 9(b)
+is substantially reduced, leading to higher xPU utilization.
+8
+
+CODA: Algorithm-Hardware Co-design for Edge Video Diffusion
+via NMP-Enabled Compute-Cache Operator Disaggregation
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+5
+Evaluation
+5.1
+Experimental Setup
+5.1.1
+CODA System.
+We evaluate CODA in a hardware-software co-designed environ-
+ment. The centralized processor (xPU) is a single NVIDIA GeForce
+RTX 4090 with 24 GB GDDR6X memory. The host system uses
+an Intel Core i9-13900K and 128 GB DRAM. The GPU and the
+near-memory subsystem communicate over PCIe 4.0 x16, with an
+aggregate bidirectional bandwidth of approximately 64 GB/s.
+For evaluation, GPU end-to-end latency and kernel latency are
+profiled using NVIDIA Nsight Compute, while cycle-level NMP
+performance is modeled by extending Ramulator 2.0 [47]. We com-
+pute bidirectional PCIe transfer timing from the segment-boundary
+activation/result size and PCIe bandwidth. We then compose GPU,
+PCIe-transfer, and NMP events into a dependency timeline: depen-
+dent events are serialized, independent events may overlap, and
+final latency is taken from the critical path, which also determines
+hidden and exposed overhead. We implement the NME microarchi-
+tecture in RTL and use Synopsys Design Compiler with the TSMC
+7nm technology library to estimate area and power. The 64KB on-
+chip SRAM buffer is modeled using a commercial SRAM compiler.
+The evaluated DIMM-NMP configuration is summarized in Table 1.
+We estimate total energy as the sum of GPU, NME, memory-
+subsystem, and PCIe-link energy. NME dynamic and static power
+are obtained from RTL synthesis and the SRAM compiler, while
+memory and PCIe energy are estimated from memory-access sta-
+tistics and link traffic. All latency, energy, and quality results are
+averaged over five runs for each prompt, and the reported end-to-
+end results include runtime overheads such as DRA handling.
+5.1.2
+Baseline Systems.
+We consider four system configurations. Vanilla-GPU denotes
+the original execution without caching. Cache-HostOffload offloads
+overflow cache to host DRAM when VRAM capacity is insuffi-
+cient. Cache-NaiveNMP offloads cache-related operators to the
+near-memory side using the same DIMM-NMP hardware configu-
+ration as CODA, but does not use our hardware-aware scheduler
+or CFG-interleaved pipelining. When the cache policy naturally se-
+lects adjacent cache operators, Cache-NaiveNMP dispatches these
+contiguous cache operators as a segment and communicates only at
+the input and output boundaries of that segment. CODA denotes the
+full system, including the lightweight DIMM-NMP, the hardware-
+aware caching scheduler, and CFG-interleaved pipelining.
+We use PAB [73] as the CTC algorithmic baseline. PAB derives
+its cache policy from per-model profiling of cross-timestep sim-
+ilarity and applies it as fixed reuse rules over selected timesteps
+and operator types. For system performance comparisons, Cache-
+HostOffload and Cache-NaiveNMP adopt the default PAB caching
+setup (i.e., PAB-Cons in Table 2), while CODA uses its own caching
+policy. We therefore compare their end-to-end system gains at a
+similar video-quality operating point, rather than under a matched
+cache ratio or identical cached-operator coverage. For quality eval-
+uation, we further report both the conservative and aggressive PAB
+settings to contextualize the quality-performance trade-off.
+5.1.3
+Workloads and Metrics.
+Table 1: Configuration Details of the Evaluated DIMM-NMP
+NME Architecture
+Configuration: 4 PEs, 8 Lanes/PE, NME Buffer size: 64 KB, One NME per DIMM
+Area overhead: 0.029 𝑚𝑚2 | Power overhead: 10.17 mW | @ 1 GHz
+DIMM Parameters
+DDR4-3200, 16 GB/DIMM × 8, 2 DIMMs/channel
+2 ranks/DIMM, 2 bank groups/rank, 4 banks/bank group
+DIMM Timing Specifications
+tRC=74, tRCD=22, tCL=22, tRP=22, tBL=4
+tCCD_S=4, tCCD_L=8, tRRD_S=4, tRRD_L=6, tFAW=26
+We evaluate CODA on a diverse set of VDMs, including Latte [49],
+Open-Sora [76], Open-Sora Plan [39], Wan 2.1 [65], Hunyuan-
+Video [27], Vchitect-2.0 [14], and CogVideoX-5B [70]. For models
+that support multiple resolutions and video lengths, we select sev-
+eral representative configurations. All text prompts are sampled
+from VBench [21] to cover diverse generation scenarios.
+We report both system efficiency and generation quality. Sys-
+tem efficiency is measured by end-to-end latency and total en-
+ergy consumption. Quality is measured by VBench [21] for multi-
+dimensional video quality, PSNR and SSIM for frame-level recon-
+struction fidelity, and LPIPS for perceptual feature distance. Each
+workload uses 100 prompts, and to reduce the impact of diffusion
+sampling stochasticity, all quality, latency, and energy results are
+averaged over five independent runs for each prompt.
+5.2
+End-to-End Speedup and Energy Efficiency
+Figure 10 reports the normalized speedup and normalized energy
+efficiency under different model, resolution, and video-length set-
+tings. Overall, CODA achieves the highest performance and energy-
+efficiency gains across all evaluated configurations, showing that it
+can translate the potential computation savings of cache reuse into
+realized end-to-end system benefits.
+A closer baseline comparison shows that moving cache operators
+to the memory side alone is insufficient. Cache-HostOffload reduces
+redundant GPU computation through cache reuse and improves
+over Vanilla-GPU, but only modestly. Cache-NaiveNMP underper-
+forms Cache-HostOffload across all workloads and even falls below
+Vanilla-GPU for Open-Sora (854×480), revealing a performance
+reversal. This shows that algorithmic reuse does not translate into
+speedup when the cache path remains tightly interleaved and seri-
+ally dependent on the native compute path, leaving communication
+and serialization overhead on the critical path. CODA makes reuse
+beneficial by reorganizing the cache path into hardware-friendly
+execution and overlapping it with GPU computation.
+Figure 10 also shows that CODA’s gain generally grows under
+heavier workloads, especially at higher resolutions. This follows
+from the scaling gap between attention computation and cached
+states. Let𝑇be tokens per frame, 𝐹frames, and 𝑑hidden dimension.
+Spatial attention scales as 𝐹𝑇2𝑑, temporal attention as 𝑇𝐹2𝑑, while
+the cache footprint grows roughly linearly with 𝐹𝑇𝑑. As resolution
+increases, cache reuse removes proportionally more GPU computa-
+tion, explaining why gain amplification is more evident at higher
+resolutions than from merely increasing video length.
+From the energy perspective, Cache-HostOffload and Cache-
+NaiveNMP often show larger energy-efficiency gains than speedup
+9
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Yuanpeng Zhang et al.
+1.08 
+1.14 
+1.05 
+1.05 
+1.10 
+1.10 
+1.30 
+1.30 
+1.28 
+1.28 
+1.24 
+1.24 
+1.39 
+1.39 
+1.01 
+1.06 
+0.98 
+0.97 
+1.04 
+1.02 
+1.24 
+1.25 
+1.22 
+1.23 
+1.17 
+1.17 
+1.35 
+1.34 
+1.62 
+1.59 
+1.57 
+1.58 
+1.67 
+1.67 
+1.79 
+1.80 
+1.73 
+1.73 
+1.69 
+1.69 
+1.71 
+1.72 
+0.6
+1.0
+1.2
+1.4
+1.6
+1.8
+512x512
+854x480
+1280x720
+960x720
+512x512
+480x288
+720x480
+720x480
+Latte
+Open-Sora
+CogVideoX
+Open-Sora Plan
+Vchitect-2.0
+Wan 2.1
+2.0
+0.8
+2s
+HunyuanVideo
+768x432
+1080x720
+1.34 
+1.34 
+1.33 
+1.30 
+1.33 
+1.30 
+1.47 
+1.47 
+1.44 
+1.44 
+1.40 
+1.40 
+1.49 
+1.49 
+1.30 
+1.30 
+1.28 
+1.26 
+1.28 
+1.26 
+1.44 
+1.44 
+1.42 
+1.42 
+1.37 
+1.37 
+1.47 
+1.46 
+1.67 
+1.61 
+1.63 
+1.61 
+1.64 
+1.61 
+1.73 
+1.74 
+1.69 
+1.70 
+1.64 
+1.64 
+1.68 
+1.69 
+Latte
+Open-Sora
+CogVideoX
+Open-Sora Plan
+Vchitect-2.0
+Wan 2.1
+HunyuanVideo
+6s
+2s
+4s
+2s
+4s
+3s
+6s
+2s
+6s
+3s
+3s
+6s
+6s
+512x512
+854x480
+1280x720
+960x720
+512x512
+480x288
+720x480
+720x480
+2s
+768x432
+1080x720
+6s
+2s
+4s
+2s
+4s
+3s
+6s
+2s
+6s
+3s
+3s
+6s
+6s
+0.6
+1.0
+1.2
+1.4
+1.6
+1.8
+2.0
+0.8
+Norm. Speedup
+Norm. Energy Efficiency
+Cache-HostOffload
+Cache-NaiveNMP
+CODA (ours)
+Vanilla-GPU
+Figure 10: CODA speedup and energy efficiency improvement on different models normalized to Vanilla-GPU.
+gains. Although they do not effectively hide waiting time from com-
+munication or near-memory execution, cache reuse still removes
+substantial redundant GPU computation. Because GPU computa-
+tion dominates power, while PCIe transfers and lightweight NMP
+execution add smaller overhead, these baselines can save energy
+even with limited latency gains. CODA further reduces redundant
+GPU computation and hides exposed cache-step stalls through
+schedule reorganization and cross-branch pipelining, delivering
+the best end-to-end speedup and energy efficiency.
+5.3
+Video Generation Fidelity
+As shown in Table 2, CODA remains close to the original models and
+to conservative PAB in overall quality. Across all evaluated models,
+its VBench scores stay close to the original results. More impor-
+tantly, compared with PAB-Aggr, CODA generally preserves better
+quality across the reported metrics at a similar quality-performance
+operating point, indicating that its system-level gains do not come
+at the cost of more severe quality degradation. Overall, CODA
+achieves a more favorable quality-performance trade-off.
+For some models, such as Latte and Open-Sora, CODA is slightly
+worse than PAB-Cons in PSNR, SSIM, or LPIPS, indicating larger
+low-level reconstruction error. However, its VBench score is slightly
+higher. This suggests that low-level frame-wise distortion metrics
+and perceptual video quality do not always vary in exactly the same
+direction. Taken together, these results indicate that CODA remains
+close to the quality level of conservative PAB while avoiding the
+more noticeable degradation introduced by aggressive caching.
+5.4
+Ablation Study and Latency Breakdown
+While Figure 10 reports the full-stack end-to-end gain at a simi-
+lar video-quality operating point, Figure 11 further reveals how
+CODA’s system mechanisms translate cache-side reuse into actual
+latency reduction. Specifically, it separates the overall gain into two
+consecutive stages: the reorganization gain from Figure 11(b) to (c),
+and the additional latency hiding from Figure 11(c) to (d).
+Model
+Method
+VBench ↑PSNR ↑SSIM ↑LPIPS ↓
+Latte [49]
+Original
+0.8115
+-
+-
+-
+PAB-Cons
+0.7873
+20.3445
+0.7101
+0.2711
+PAB-Aggr
+0.7556
+17.8648
+0.6499
+0.3905
+CODA
+0.7916
+18.7831
+0.6688
+0.3237
+Open-Sora [76]
+Original
+0.8051
+-
+-
+-
+PAB-Cons
+0.7783
+27.6532
+0.8891
+0.0892
+PAB-Aggr
+0.7489
+23.4794
+0.8179
+0.1879
+CODA
+0.7815
+26.8527
+0.8768
+0.1016
+CogVideoX [70]
+Original
+0.7744
+-
+-
+-
+PAB-Cons
+0.7733
+30.8723
+0.9365
+0.0578
+PAB-Aggr
+0.7630
+26.4205
+0.8882
+0.1135
+CODA
+0.7642
+27.8768
+0.9078
+0.0905
+Open-Sora Plan [39]
+Original
+0.8070
+-
+-
+-
+PAB-Cons
+0.7825
+20.3832
+0.6703
+0.3145
+PAB-Aggr
+0.6685
+16.8197
+0.4730
+0.5436
+CODA
+0.7676
+17.1897
+0.4722
+0.4965
+Vchitect-2.0 [14]
+Original
+0.7944
+-
+-
+-
+PAB-Cons
+0.7941
+28.1246
+0.8945
+0.0407
+PAB-Aggr
+0.7907
+27.3833
+0.8884
+0.0498
+CODA
+0.7923
+28.0815
+0.8958
+0.0409
+Wan 2.1 [65]
+Original
+0.7434
+-
+-
+-
+PAB-Cons
+0.7316
+26.3462
+0.8535
+0.0836
+PAB-Aggr
+0.7096
+21.6930
+0.7397
+0.1986
+CODA
+0.7277
+24.3621
+0.7978
+0.1483
+HunyuanVideo [27]
+Original
+0.8120
+-
+-
+-
+PAB-Cons
+0.8013
+27.9286
+0.8793
+0.1082
+PAB-Aggr
+0.7853
+26.8234
+0.8640
+0.1316
+CODA
+0.7939
+27.6777
+0.8749
+0.1152
+Table 2: Quality evaluation. PAB-Cons and PAB-Aggr denote
+the conservative and aggressive configurations of PAB [73],
+with specific parameters varying by model. PSNR, SSIM, and
+LPIPS are calculated against the original model results.
+10
+
+CODA: Algorithm-Hardware Co-design for Edge Video Diffusion
+via NMP-Enabled Compute-Cache Operator Disaggregation
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Normalized Latency
+1.22×
+1.32×
+1.23×
+1.32×
+1.20×
+1.34×
+1.21×
+1.24×
+1.14×
+1.12×
+GPU Compute
+PCIe Overhead
+NMP Overhead
+Hidden PCIe
+Hidden NMP
+Exposed PCIe
+Exposed NMP
+(a)(b)(c)(d)
+ 
+(a)(b)(c)(d)
+ 
+(a)(b)(c)(d)
+ 
+(a)(b)(c)(d)
+ 
+(a)(b)(c)(d)
+Open-Sora
+ 
+Open-Sora
+ 
+Open-Sora
+ 
+Wan 2.1
+ 
+HunyuanVideo
+854x480, 2s
+ 
+854x480, 4s
+ 
+1280x720, 2s
+ 
+720x480, 6s
+ 
+1080x720, 6s
+Figure 11: Ablation study and latency breakdown: (a)
+Cache-HostOffload, (b) +Lightweight DIMM-NMP (naive),
+(c) +Hybrid Hardware-Aware Caching Scheduler, (d) +CFG-
+Interleaved Pipelining (full CODA). Bars further separate
+exposed and hidden PCIe/NMP overhead to illustrate the
+effects of scheduling and overlap.
+First, adding Lightweight DIMM-NMP alone does not yield vis-
+ible latency reduction and instead exposes additional NMP-side
+overhead, showing that near-memory execution capability alone
+cannot automatically convert cache reuse into end-to-end speedup.
+Nevertheless, Lightweight DIMM-NMP remains necessary because
+it lets cache operators complete independently on the memory side,
+establishing physical separation between the compute and cache
+paths for subsequent optimization.
+The scheduler then produces the first visible latency reduction
+from Figure 11(b) to (c) by reorganizing fragmented cache activity
+into hardware-friendly coalesced segments. This reduces exposed
+PCIe and NMP overhead from fine-grained, highly interleaved trig-
+gering, showing that system-level scheduling is needed to turn
+disaggregation into a measurable end-to-end benefit.
+CFG-Interleaved Pipelining provides the second stage of gain
+from Figure 11(c) to (d). After scheduling reorganizes the cache path,
+pipelining uses the GPU compute window of the other CFG branch
+to hide remaining PCIe/NMP overhead and shorten the critical path.
+This effect becomes stronger under heavier workloads because
+longer GPU operators can absorb more communication and near-
+memory execution time. For HunyuanVideo, GPU computation
+already dominates the timeline, so cache-side overhead is almost
+entirely hidden, while the end-to-end gain remains bounded by the
+small non-compute portion left to optimize.
+To isolate the execution stack under the same CODA caching
+policy, we add a matched-scheduler ablation and report the largest
+evaluated resolution/length setting for each model. With the CODA
+caching policy, NaiveNMP already outperforms the matched HostOf-
+fload baseline, showing that the scheduler-generated cache trace
+is more amenable to NMP execution. Full CODA still achieves
+higher gains because CFG-interleaved pipelining overlaps the NMP-
+enabled independent cache path with xPU computation.
+1.13 
+1.10 
+1.11 
+1.07 
+1.07 
+1.07 
+1.04 
+1.48 
+1.36 
+1.49 
+1.33 
+1.31 
+1.33 
+1.17 
+0.6
+0.7
+0.8
+0.9
+1
+1.1
+1.2
+1.3
+1.4
+1.5
+Latte
+Wan 2.1 Open-Sora CogVideoX
+Open-
+Sora Plan
+Vchitect-
+2.0
+Hunyuan
+Video
+CacheCODA-HostOffload
+CacheCODA-NaiveNMP
+Full CODA
+Figure 12: Ablation study with same CODA caching policy:
+CacheCODA denotes variants that use the cache trace produced
+by CODA’s Hybrid Hardware-Aware Caching Scheduler.
+0
+10
+20
+30
+40
+60
+80
+100
+GPU Utilization (%)
+Cache Step Avg Util:
+ NaiveNMP: 66.8%
+CODA (Ours): 88.2%
+(a) Open-Sora 480p
+0
+10
+20
+30
+40
+60
+80
+100
+Cache Step Avg Util:
+ NaiveNMP: 70.8%
+CODA (Ours): 95.0%
+(b) Open-Sora 720p
+Timestep (Denoising Process)
+0
+10
+20
+30
+Timestep (Denoising Process)
+70
+80
+90
+100
+Cache Step Avg Util:
+ NaiveNMP: 88.9%
+CODA (Ours): 100.0%
+(d) HunyuanVideo
+CODA
+NaiveNMP
+CODA cache steps
+Baseline cache steps
+CODA cache
+ends later
+CODA cache
+starts earlier
+0
+10
+20
+30
+40
+60
+80
+100
+GPU Utilization (%)
+Cache Step Avg Util:
+ NaiveNMP: 73.9%
+CODA (Ours): 91.6%
+(c) Wan 2.1
+Figure 13: GPU dense-compute utilization across timesteps
+for CODA and Cache-NaiveNMP. Shaded regions indicate
+cache-step intervals for CODA and baseline (default PAB).
+5.5
+GPU Utilization Across Denoising Timesteps
+Figure 13 compares CODA and Cache-NaiveNMP (NaiveNMP in
+the figure) using GPU dense-compute utilization across timesteps,
+normalized to non-cache timesteps (100%).
+NaiveNMP shows lower and more fluctuating utilization during
+cache steps, especially within the default-PAB intervals shaded red.
+This indicates that cache-side execution and communication remain
+exposed on the critical path, interrupting continuous GPU compu-
+tation. In contrast, CODA keeps utilization higher and steadier by
+reducing cache-side interference and keeping the GPU active in
+dense computation. The figure also shows that heavier workloads
+create larger hiding windows because dominant GPU operators
+run longer. CODA therefore generally maintains higher normalized
+utilization in these settings. For some workloads, CODA also ap-
+plies caching over slightly wider timestep ranges while preserving
+higher utilization and competitive generation quality.
+5.6
+Efficacy of Dynamic Runtime Adjustment
+Although CODA’s static caching policy preserves generation quality
+well in most cases, a small number of prompts can still trigger DRA.
+DRA then conservatively adjusts the planned cache-entry behavior
+near the start of the caching phase. Across all evaluated models, the
+triggered fraction remains below 7%. Figure 14 shows representative
+cases where visible local degradation appears without DRA, while
+11
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Yuanpeng Zhang et al.
+Original
+Latte
+Open-Sora
+Open-Sora Plan
+CogVideoX
+with DRA
+prompt: A cute happy Corgi playing in park, sunset, tilt down
+prompt: A steam train moving on a mountainside
+prompt: a shark is swimming in the ocean, watercolor painting
+prompt: a shark is swimming in the ocean
+Static (w/o DRA)
+Figure 14: DRA restores visible local details of corner cases.
+Red boxes highlight the local details recovered by DRA.
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Norm. Cache Step Latency Breakdown
++0.5%
++1.5%
++5.0%
+Middle
+Middle
+Middle
++0.2%
++0.8%
++5.0%
+Edge
+Edge
+Edge
+w/o DRA
+w/o DRA
+w/o DRA
+GPU Compute
+Hidden PCIe
+Exposed PCIe
+Hidden NMP
+Exposed NMP
+ed GPU
+en by add
+fully hidd
+compute
+Cannot be
+Open-Sora
+854x480, 4s
+Wan 2.1
+720x480, 6s
+Hunyuan
+Video
+1080x720, 6s
+Figure 15: Latency breakdown at the triggered timestep when
+an operator falls back to conservative mode under DRA.
+enabling DRA restores local details. Thus, DRA can mitigate visible
+local artifacts despite being activated only rarely.
+Figure 15 quantifies DRA’s cost by showing the normalized
+cache-step latency when one operator falls back to conservative
+mode, with annotations marking the incremental overhead at that
+timestep. The main added latency comes from replacing a cache
+operator with GPU compute, while shadow monitoring itself adds
+no exposed critical-path latency. Edge and Middle denote whether
+the fallback operator lies at the boundary or inside the original
+coarse-grained coalesced segment. An edge fallback introduces no
+extra PCIe latency, and the added GPU compute can still cover
+part of the original PCIe communication and NMP execution. A
+middle fallback introduces extra PCIe overhead, but GPU compute
+can hide part of that cost. Because such fallbacks occur only at a
+small number of triggered timesteps and are amortized over the
+denoising process, their end-to-end impact remains small. Thus,
+DRA provides a low-cost runtime safeguard for rare corner cases.
+8
+16
+32
+64 128 256 512
+NMP Buffer Size (KB)
+0.2
+0.4
+0.6
+0.8
+1.0
+Norm. Perf
+Optimal Buffer Size
+(64 KB)
+1 2
+4
+8
+12
+16
+NME Number of PEs
+0.2
+0.4
+0.6
+0.8
+1.0
+Hardware Saturation
+(4 PEs)
+Figure 16: Architecture DSE for NMP buffer and PE numbers.
+5.7
+Architecture DSE and Hardware Overhead
+Figure 16 explores the proposed NMP buffer size and PE count. Per-
+formance improves with larger buffers but largely saturates around
+64 KB, and increases up to 4 PEs before the benefit becomes limited.
+We therefore adopt a lightweight 64 KB buffer, 4-PE, 1 GHz con-
+figuration that captures most of CODA’s system-level benefit. We
+synthesize the NMP engine RTL with Synopsys Design Compiler
+in TSMC 7nm and obtain 64 KB SRAM parameters from a com-
+mercial SRAM compiler. A single NME occupies about 0.029 mm2
+and consumes about 10.17mW. Compared with a 13W DIMM [28]
+and a typical 100 mm2 memory buffer chip [52], both area and
+power overheads are below 0.1%, showing that the lightweight
+NMP configuration is sufficient for CODA’s system-level gains.
+6
+Related Work
+Cross-timestep caching. Existing CTC methods exploit cross-
+timestep similarity to construct cache policies at different granu-
+larities, from fixed reuse rules over timesteps or operator types, as
+in FORA [61] and PAB [73], to token-wise caching [78], timestep-
+aware estimation [15] and forecasting-based reuse [43]. These meth-
+ods focus on reusing features, operators, or tokens to reduce redun-
+dant computation while controlling quality. CODA builds on this
+foundation but formulates cache reuse as hardware-aware planning:
+it uses cacheability as a scheduling signal and combines it with
+communication and execution costs in the cache-policy search.
+Video diffusion acceleration. Another line of work accelerates na-
+tive VDM computation within existing operators. Sparse VideoGen
+[68] exploits spatial-temporal attention sparsity, while ViDA [13]
+and FlightVGM [42] use differential approximation, activation spar-
+sification, hybrid precision, and accelerator dataflow. These meth-
+ods usually reduce the computation or execution cost within exist-
+ing dense operators. CODA is complementary: after CTC replaces
+selected dense operators with cache operators, CODA focuses on
+executing this cache path under overflow through DIMM-side exe-
+cution, coalesced scheduling, and CFG-overlapped execution.
+7
+Discussion and Future Work
+The current Hybrid Hardware-Aware Caching Scheduler is one
+instantiation of a broader hardware-aware scheduling paradigm,
+rather than a fixed policy tied to current VDMs and CTC settings.
+In CODA, the scheduler jointly considers model-side cacheability
+and system-side execution cost to decide where caching should be
+applied, where conservative execution should be retained, and how
+12
+
+CODA: Algorithm-Hardware Co-design for Edge Video Diffusion
+via NMP-Enabled Compute-Cache Operator Disaggregation
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+fragmented cache operators should be reorganized into hardware-
+friendly segments. Thus, the scheduler is not bound to the cur-
+rent profiling metric or cache policy. As VDM architectures evolve
+and future CTC algorithms introduce new reuse opportunities and
+quality-performance tradeoffs, the framework can absorb updated
+stability signals, risk estimators, and cost terms while preserving
+the compute-cache disaggregation architecture.
+Another direction is to extend CODA beyond VDMs to diffusion
+language models (DLLMs) [4, 7, 8, 54]. Recent DLLM studies exploit
+temporal stability across denoising steps through KV-cache reuse
+and selective recomputation, suggesting that diffusion-based text
+generation may also exhibit interplay between newly computed
+and reused cached states [23, 50, 66]. This makes compute-cache
+disaggregation potentially useful for DLLM acceleration. However,
+this extension would not directly port the current CODA pipeline.
+Compared with VDMs, DLLMs expose different token-level dynam-
+ics, different cache objects, and may not provide the CFG-based
+overlap opportunity. A DLLM-oriented CODA would likely require
+redesigned scheduling signals and a new overlap mechanism tai-
+lored to token/KV evolution, which we leave for future work.
+8
+Conclusion
+This paper presents CODA, an algorithm-hardware co-designed
+architecture to address the system bottlenecks of edge video dif-
+fusion generation. We show that since cached states can easily
+exceed on-device VRAM and be forced into host memory, the key
+limitation is no longer only redundant computation, but also the
+PCIe communication and serialization overhead introduced by the
+cache path. CODA therefore centers on compute-cache operator
+disaggregation: dense compute remains on the xPU, while memory-
+bound cache operators are offloaded to a lightweight DIMM-NMP
+subsystem. Combined with a hardware-aware caching scheduler
+and CFG-Interleaved Pipelining, this design transforms fragmented,
+blocking cache execution into a reorganized and overlapped exe-
+cution flow. Experimental results show that CODA converts the
+potential benefit of cross-timestep caching into real end-to-end sys-
+tem gains, achieving up to 1.80× speedup and 1.74× higher energy
+efficiency with high generation quality and low hardware overhead.
+These results suggest that, for edge VDM deployment, the key is
+not merely to move cache-related work closer to memory, but to co-
+design operator disaggregation, scheduling, and execution overlap
+around the communication and serialization bottlenecks.
+References
+[1] Kazi Asifuzzaman, Narasinga Rao Miniskar, Aaron R. Young, Frank Liu, and
+Jeffrey S. Vetter. 2023. A survey on processing-in-memory techniques: Advances
+and challenges. Memories - Materials, Devices, Circuits and Systems 4 (July 2023),
+100022. https://doi.org/10.1016/j.memori.2022.100022
+[2] Gulcin Baykal, Halil Faruk Karagoz, Taha Binhuraib, and Gozde Unal. 2023.
+ProtoDiffusion: Classifier-Free Diffusion Guidance with Prototype Learning.
+https://doi.org/10.48550/arXiv.2307.01924 arXiv:2307.01924 [cs].
+[3] Philipp Becker, Abhinav Mehrotra, Ruchika Chavhan, Malcolm Chadwick, Luca
+Morreale, Mehdi Noroozi, Alberto Gil Ramos, and Sourav Bhattacharya. 2025.
+EDiT: Efficient Diffusion Transformers with Linear Compressed Attention. https:
+//doi.org/10.48550/arXiv.2503.16726 arXiv:2503.16726 [cs].
+[4] Tiwei Bie, Maosong Cao, Kun Chen, Lun Du, Mingliang Gong, Zhuochen Gong,
+Yanmei Gu, Jiaqi Hu, Zenan Huang, Zhenzhong Lan, Chengxi Li, Chongxuan Li,
+Jianguo Li, Zehuan Li, Huabin Liu, Lin Liu, Guoshan Lu, Xiaocheng Lu, Yuxin
+Ma, Jianfeng Tan, Lanning Wei, Ji-Rong Wen, Yipeng Xing, Xiaolu Zhang, Junbo
+Zhao, Da Zheng, Jun Zhou, Junlin Zhou, Zhanchao Zhou, Liwang Zhu, and
+Yihong Zhuang. 2025. LLaDA2.0: Scaling Up Diffusion Language Models to 100B.
+arXiv:2512.15745 [cs.LG] https://arxiv.org/abs/2512.15745
+[5] Andreas Blattmann, Tim Dockhorn, Sumith Kulal, Daniel Mendelevitch, Maciej
+Kilian, Dominik Lorenz, Yam Levi, Zion English, Vikram Voleti, Adam Letts, Varun
+Jampani, and Robin Rombach. 2023. Stable Video Diffusion: Scaling Latent Video
+Diffusion Models to Large Datasets. https://doi.org/10.48550/arXiv.2311.15127
+arXiv:2311.15127 [cs].
+[6] Arwen Bradley and Preetum Nakkiran. 2024. Classifier-Free Guidance is a
+Predictor-Corrector. https://doi.org/10.48550/arXiv.2408.09000 arXiv:2408.09000
+[cs].
+[7] Xinhua Chen, Sitao Huang, Cong Guo, Chiyue Wei, Yintao He, Jianyi Zhang,
+Hai Helen Li, and Yiran Chen. 2026. DPad: Efficient Diffusion Language Models
+with Suffix Dropout. In The Fourteenth International Conference on Learning
+Representations. https://openreview.net/forum?id=0yOsSMU1eY
+[8] Shuang Cheng, Yihan Bian, Dawei Liu, Linfeng Zhang, Qian Yao, Zhongbo
+Tian, Wenhai Wang, Qipeng Guo, Kai Chen, Biqing Qi, and Bowen Zhou. 2025.
+SDAR: A Synergistic Diffusion-AutoRegression Paradigm for Scalable Sequence
+Generation. arXiv:2510.06303 [cs.LG] https://arxiv.org/abs/2510.06303
+[9] Huanpeng Chu, Wei Wu, Chengjie Zang, and Kun Yuan. 2024. QNCD: Quantiza-
+tion Noise Correction for Diffusion Models. https://doi.org/10.48550/arXiv.2403.
+19140 arXiv:2403.19140 [cs].
+[10] Hyungjin Chung, Jeongsol Kim, Geon Yeong Park, Hyelin Nam, and Jong Chul
+Ye. 2025. CFG++: Manifold-constrained Classifier Free Guidance for Diffusion
+Models. In The Thirteenth International Conference on Learning Representations.
+https://openreview.net/forum?id=E77uvbOTtp
+[11] Hanshuai Cui, Zhiqing Tang, Zhifei Xu, Zhi Yao, Wenyi Zeng, and Weijia Jia.
+2026. BWCache: Accelerating Video Diffusion Transformers through Block-Wise
+Caching. In The Fourteenth International Conference on Learning Representations.
+https://openreview.net/forum?id=5bJZtzTFYy
+[12] Hangliang Ding, Dacheng Li, Runlong Su, Peiyuan Zhang, Zhijie Deng, Ion Stoica,
+and Hao Zhang. 2025. Efficient-vDiT: Efficient Video Diffusion Transformers
+With Attention Tile. arXiv:2502.06155 [cs.CV] https://arxiv.org/abs/2502.06155
+[13] Li Ding, Jun Liu, Shan Huang, and Guohao Dai. 2025. ViDA: Video Diffusion Trans-
+former Acceleration with Differential Approximation and Adaptive Dataflow.
+In Proceedings of the 30th Asia and South Pacific Design Automation Conference
+(Tokyo, Japan) (ASPDAC ’25). Association for Computing Machinery, New York,
+NY, USA, 148–154. https://doi.org/10.1145/3658617.3697692
+[14] Weichen Fan, Chenyang Si, Junhao Song, Zhenyu Yang, Yinan He, Long Zhuo,
+Ziqi Huang, Ziyue Dong, Jingwen He, Dongwei Pan, Yi Wang, Yuming Jiang,
+Yaohui Wang, Peng Gao, Xinyuan Chen, Hengjie Li, Dahua Lin, Yu Qiao, and
+Ziwei Liu. 2025. Vchitect-2.0: Parallel Transformer for Scaling Up Video Diffusion
+Models. https://doi.org/10.48550/arXiv.2501.08453 arXiv:2501.08453 [cs].
+[15] Zhentao Fan, Zongzuo Wang, and Weiwei Zhang. 2025. TaoCache: Structure-
+Maintained Video Generation Acceleration. https://doi.org/10.48550/arXiv.2508.
+08978 arXiv:2508.08978 [cs].
+[16] Alibaba Cloud Group. 2026. Wan AI: Leading AI Video Generation Model. https:
+//wan.video/.
+[17] Peng Gu, Xinfeng Xie, Yufei Ding, Guoyang Chen, Weifeng Zhang, Dimin Niu, and
+Yuan Xie. 2020. iPIM: Programmable In-Memory Image Processing Accelerator
+Using Near-Bank Architecture. In 2020 ACM/IEEE 47th Annual International
+Symposium on Computer Architecture (ISCA) (2020-05). 804–817. https://doi.org/
+10.1109/ISCA45697.2020.00071
+[18] Juan Gómez-Luna, Izzat El Hajj, Ivan Fernandez, Christina Giannoula, Geraldo F.
+Oliveira, and Onur Mutlu. 2022. Benchmarking a New Paradigm: An Experimental
+Analysis of a Real Processing-in-Memory Architecture. https://doi.org/10.48550/
+arXiv.2105.03814 arXiv:2105.03814 [cs].
+[19] Yefei He, Jing Liu, Weijia Wu, Hong Zhou, and Bohan Zhuang. 2024. EfficientDM:
+Efficient Quantization-Aware Fine-Tuning of Low-Bit Diffusion Models. In The
+Twelfth International Conference on Learning Representations. https://openreview.
+net/forum?id=UmMa3UNDAz
+13
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Yuanpeng Zhang et al.
+[20] Jonathan Ho and Tim Salimans. 2022. Classifier-Free Diffusion Guidance. https:
+//doi.org/10.48550/arXiv.2207.12598 arXiv:2207.12598 [cs].
+[21] Ziqi Huang, Yinan He, Jiashuo Yu, Fan Zhang, Chenyang Si, Yuming Jiang,
+Yuanhan Zhang, Tianxing Wu, Qingyang Jin, Nattapol Chanpaisit, Yaohui Wang,
+Xinyuan Chen, Limin Wang, Dahua Lin, Yu Qiao, and Ziwei Liu. 2023. VBench:
+Comprehensive Benchmark Suite for Video Generative Models. https://doi.org/
+10.48550/arXiv.2311.17982 arXiv:2311.17982 [cs].
+[22] Wenqin Huangfu, Xueqi Li, Shuangchen Li, Xing Hu, Peng Gu, and Yuan Xie.
+2019. MEDAL: Scalable DIMM based Near Data Processing Accelerator for DNA
+Seeding Algorithm. In Proceedings of the 52nd Annual IEEE/ACM International
+Symposium on Microarchitecture (New York, NY, USA, 2019-10-12) (MICRO-52).
+Association for Computing Machinery, 587–599. https://doi.org/10.1145/3352460.
+3358329
+[23] Yuchu Jiang, Yue Cai, Xiangzhong Luo, Jiale Fu, Jiarui Wang, Chonghan Liu,
+and Xu Yang. 2026. d$^2$Cache: Accelerating Diffusion-Based LLMs via Dual
+Adaptive Caching. In The Fourteenth International Conference on Learning Repre-
+sentations. https://openreview.net/forum?id=SjInfpK5RM
+[24] Sunitha Kanipakam, Vishnupriya S Devarajulu, and Tulasi Kavarakuntla. 2025.
+Privacy-Preserving AI Inference in Edge Systems: Ethical and Architectural Trade-
+offs. In 2025 IEEE International Performance, Computing, and Communications
+Conference (IPCCC). 1–6.
+https://doi.org/10.1109/IPCCC66453.2025.11304649
+ISSN: 2374-9628.
+[25] Liu Ke, Udit Gupta, Benjamin Youngjae Cho, David Brooks, Vikas Chandra,
+Utku Diril, Amin Firoozshahian, Kim Hazelwood, Bill Jia, Hsien-Hsin S. Lee,
+Meng Li, Bert Maher, Dheevatsa Mudigere, Maxim Naumov, Martin Schatz,
+Mikhail Smelyanskiy, Xiaodong Wang, Brandon Reagen, Carole-Jean Wu, Mark
+Hempstead, and Xuan Zhang. 2020. RecNMP: Accelerating Personalized Rec-
+ommendation with Near-Memory Processing. In 2020 ACM/IEEE 47th Annual
+International Symposium on Computer Architecture (ISCA). 790–803.
+https:
+//doi.org/10.1109/ISCA45697.2020.00070
+[26] Donghyuk Kim, Jae-Young Kim, Wontak Han, Jongsoon Won, Haerang Choi,
+Yongkee Kwon, and Joo-Young Kim. 2025. Darwin: A DRAM-based Multi-level
+Processing-in-Memory Architecture for Data Analytics. 13, 3 (2025), 739–752.
+https://doi.org/10.1109/TETC.2024.3493132 arXiv:2305.13970 [eess]
+[27] Weijie Kong, Qi Tian, Zijian Zhang, Rox Min, Zuozhuo Dai, Jin Zhou, Jiangfeng
+Xiong, Xin Li, Bo Wu, Jianwei Zhang, Kathrina Wu, Qin Lin, Junkun Yuan, Yanxin
+Long, Aladdin Wang, Andong Wang, Changlin Li, Duojun Huang, Fang Yang,
+Hao Tan, Hongmei Wang, Jacob Song, Jiawang Bai, Jianbing Wu, Jinbao Xue, Joey
+Wang, Kai Wang, Mengyang Liu, Pengyu Li, Shuai Li, Weiyan Wang, Wenqing
+Yu, Xinchi Deng, Yang Li, Yi Chen, Yutao Cui, Yuanbo Peng, Zhentao Yu, Zhiyu
+He, Zhiyong Xu, Zixiang Zhou, Zunnan Xu, Yangyu Tao, Qinglin Lu, Songtao
+Liu, Dax Zhou, Hongfa Wang, Yong Yang, Di Wang, Yuhong Liu, Jie Jiang, and
+Caesar Zhong. 2025. HunyuanVideo: A Systematic Framework For Large Video
+Generative Models. arXiv:2412.03603 [cs.CV] https://arxiv.org/abs/2412.03603
+[28] Youngeun Kwon, Yunjae Lee, and Minsoo Rhu. 2019. TensorDIMM: A Practical
+Near-Memory Processing Architecture for Embeddings and Tensor Operations
+in Deep Learning. https://doi.org/10.48550/arXiv.1908.03072 arXiv:1908.03072
+[cs].
+[29] ByteDance AI Lab. 2026. Seedance 2.0: The Next Generation of AI Video. https:
+//fal.ai/seedance-2.0.
+[30] Donghun Lee, Jinin So, MINSEON AHN, Jong-Geon Lee, Jungmin Kim,
+Jeonghyeon Cho, Rebholz Oliver, Vishnu Charan Thummala, Ravi shankar JV,
+Sachin Suresh Upadhya, Mohammed Ibrahim Khan, and Jin Hyun Kim. 2022. Im-
+proving In-Memory Database Operations with Acceleration DIMM (AxDIMM). In
+Proceedings of the 18th International Workshop on Data Management on New Hard-
+ware (Philadelphia, PA, USA) (DaMoN ’22). Association for Computing Machinery,
+New York, NY, USA, Article 2, 9 pages. https://doi.org/10.1145/3533737.3535093
+[31] Seongju Lee, Kyuyoung Kim, Sanghoon Oh, Joonhong Park, Gimoon Hong,
+Dongyoon Ka, Kyudong Hwang, Jeongje Park, Kyeongpil Kang, Jungyeon Kim,
+Junyeol Jeon, Nahsung Kim, Yongkee Kwon, Kornijcuk Vladimir, Woojae Shin,
+Jongsoon Won, Minkyu Lee, Hyunha Joo, Haerang Choi, Jaewook Lee, Donguc
+Ko, Younggun Jun, Keewon Cho, Ilwoong Kim, Choungki Song, Chunseok Jeong,
+Daehan Kwon, Jieun Jang, Il Park, Junhyun Chun, and Joohwan Cho. 2022. A
+1ynm 1.25V 8Gb, 16Gb/s/pin GDDR6-based Accelerator-in-Memory supporting
+1TFLOPS MAC Operation and Various Activation Functions for Deep-Learning
+Applications. In 2022 IEEE International Solid-State Circuits Conference (ISSCC),
+Vol. 65. 1–3. https://doi.org/10.1109/ISSCC42614.2022.9731711
+[32] Cong Li, Zhe Zhou, Size Zheng, Jiaxi Zhang, Yun Liang, and Guangyu Sun.
+2024. SpecPIM: Accelerating Speculative Inference on PIM-Enabled System via
+Architecture-Dataflow Co-Exploration. In Proceedings of the 29th ACM Inter-
+national Conference on Architectural Support for Programming Languages and
+Operating Systems, Volume 3 (ASPLOS ’24, Vol. 3). Association for Computing Ma-
+chinery, New York, NY, USA, 950–965. https://doi.org/10.1145/3620666.3651352
+[33] En Li, Liekang Zeng, Zhi Zhou, and Xu Chen. 2020. Edge AI: On-Demand
+Accelerating Deep Neural Network Inference via Edge Computing.
+IEEE
+Transactions on Wireless Communications 19, 1 (Jan. 2020), 447–457.
+https:
+//doi.org/10.1109/TWC.2019.2946140
+[34] Huize Li, Dan Chen, and Tulika Mitra. 2025.
+SADIMM: Accelerating Sparse
+Attention Using DIMM-Based Near-Memory Processing . IEEE Trans. Comput.
+74, 02 (Feb. 2025), 542–554. https://doi.org/10.1109/TC.2024.3500362
+[35] Wenhao Li, Daohai Yu, Gen Luo, Yuxin Zhang, Fei Chao, Rongrong Ji, Yifan Wu,
+Jiaxin Liu, Ziyang Gong, and Zimu Liao. 2026. Out of the Memory Barrier: A
+Highly Memory Efficient Training System for LLMs with Million-Token Contexts.
+https://doi.org/10.48550/arXiv.2602.02108 arXiv:2602.02108 [cs] version: 2.
+[36] Xiang Li, Rongrong Wang, and Qing Qu. 2025.
+Towards Understanding the
+Mechanisms of Classifier-Free Guidance. https://arxiv.org/abs/2505.19210v3
+[37] Yanxi Li and Chengbin Du. 2025. Optimizing Quantized Diffusion Models via
+Distillation with Cross-Timestep Error Correction. Proceedings of the AAAI
+Conference on Artificial Intelligence 39, 17 (April 2025), 18530–18538.
+https:
+//doi.org/10.1609/aaai.v39i17.34039
+[38] Yiwei Li, Yuxin Jin, Boyu Tian, Huanchen Zhang, and Mingyu Gao. [n. d.]. ANS-
+MET: Approximate Nearest Neighbor Search with Near-Memory Processing
+and Hybrid Early Termination. In Proceedings of the 52nd Annual International
+Symposium on Computer Architecture (New York, NY, USA, 2025-06-20) (ISCA
+’25). Association for Computing Machinery, 1093–1107. https://doi.org/10.1145/
+3695053.3731013
+[39] Bin Lin, Yunyang Ge, Xinhua Cheng, Zongjian Li, Bin Zhu, Shaodong Wang,
+Xianyi He, Yang Ye, Shenghai Yuan, Liuhan Chen, et al. 2024. Open-Sora Plan:
+Open-Source Large Video Generation Model. arXiv preprint arXiv:2412.00131
+(2024).
+[40] Dong Liu, Yanxuan Yu, Jiayi Zhang, Yifan Li, Ben Lengerich, and Ying Nian Wu.
+2026. FastCache: Fast Caching for Diffusion Transformer Through Learnable Lin-
+ear Approximation. https://doi.org/10.48550/arXiv.2505.20353 arXiv:2505.20353
+[cs] version: 3.
+[41] Jiacheng Liu, Peiliang Cai, Qinming Zhou, Yuqi Lin, Deyang Kong, Benhao
+Huang, Yupei Pan, Haowen Xu, Chang Zou, Junshu Tang, Shikang Zheng, and
+Linfeng Zhang. 2025. FreqCa: Accelerating Diffusion Models via Frequency-
+Aware Caching. https://doi.org/10.48550/arXiv.2510.08669 arXiv:2510.08669 [cs]
+version: 1.
+[42] Jun Liu, Shulin Zeng, Li Ding, Widyadewi Soedarmadji, Hao Zhou, Zehao Wang,
+Jinhao Li, Jintao Li, Yadong Dai, Kairui Wen, Shan He, Yaqi Sun, Yu Wang, and
+Guohao Dai. 2025. FlightVGM: Efficient Video Generation Model Inference
+with Online Sparsification and Hybrid Precision on FPGAs. In Proceedings of the
+2025 ACM/SIGDA International Symposium on Field Programmable Gate Arrays
+(Monterey, CA, USA) (FPGA ’25). Association for Computing Machinery, New
+York, NY, USA, 2–13. https://doi.org/10.1145/3706628.3708864
+[43] Jiacheng Liu, Chang Zou, Yuanhuiyi Lyu, Junjie Chen, and Linfeng Zhang. 2025.
+From Reusing to Forecasting: Accelerating Diffusion Models with TaylorSeers.
+https://doi.org/10.48550/arXiv.2503.06923 arXiv:2503.06923 [cs]
+[44] Jiacheng Liu, Chang Zou, Yuanhuiyi Lyu, Fei Ren, Shaobo Wang, Kaixin Li, and
+Linfeng Zhang. 2025. SpeCa: Accelerating Diffusion Transformers with Specula-
+tive Feature Caching. In Proceedings of the 33rd ACM International Conference on
+Multimedia (2025-10-27). 10024–10033. https://doi.org/10.1145/3746027.3755331
+arXiv:2509.11628 [cs]
+[45] Liu Liu, Jilan Lin, Zheng Qu, Yufei Ding, and Yuan Xie. 2021. ENMC: Extreme
+Near-Memory Classification via Approximate Screening. In MICRO-54: 54th
+Annual IEEE/ACM International Symposium on Microarchitecture (New York, NY,
+USA, 2021-10-17) (MICRO ’21). Association for Computing Machinery, 1309–1322.
+https://doi.org/10.1145/3466752.3480090
+[46] Lian Liu, Shixin Zhao, Bing Li, Haimeng Ren, Zhaohui Xu, Mengdi Wang, Xi-
+aowei Li, Yinhe Han, and Ying Wang. 2025. Make LLM Inference Affordable to
+Everyone: Augmenting GPU Memory with NDP-DIMM. In 2025 IEEE Interna-
+tional Symposium on High Performance Computer Architecture (HPCA) (2025-03).
+1751–1765. https://doi.org/10.1109/HPCA61900.2025.00129
+[47] Haocong Luo, Yahya Can Tuğrul, F. Nisa Bostancı, Ataberk Olgun, A. Giray
+Yağlıkçı, and Onur Mutlu. 2024. Ramulator 2.0: A Modern, Modular, and Ex-
+tensible DRAM Simulator. IEEE Comput. Archit. Lett. 23, 1 (Jan. 2024), 112–116.
+https://doi.org/10.1109/LCA.2023.3333759
+[48] Xuran Ma, Yexin Liu, Yaofu Liu, Xianfeng Wu, Mingzhe Zheng, Zihao Wang, Ser-
+Nam Lim, and Harry Yang. 2025. Model Reveals What to Cache: Profiling-Based
+Feature Reuse for Video Diffusion Models. (October 2025), 17150–17159.
+[49] Xin Ma, Yaohui Wang, Xinyuan Chen, Gengyun Jia, Ziwei Liu, Yuan-Fang Li,
+Cunjian Chen, and Yu Qiao. 2025. Latte: Latent Diffusion Transformer for Video
+Generation. Transactions on Machine Learning Research (2025).
+[50] Xinyin Ma, Runpeng Yu, Gongfan Fang, and Xinchao Wang. 2025. dKV-Cache:
+The Cache for Diffusion Language Models. In The Thirty-ninth Annual Conference
+on Neural Information Processing Systems.
+https://openreview.net/forum?id=
+Gppo2JImHs
+[51] Avinash Kumar Maurya, M. Mustafa Rafique, Franck Cappello, and Bogdan
+Nicolae. 2025. MLP-Offload: Multi-Level, Multi-Path Offloading for LLM Pre-
+training to Break the GPU Memory Wall. In Proceedings of the International
+Conference for High Performance Computing, Networking, Storage and Analysis
+(New York, NY, USA, 2025-11-15) (SC ’25). Association for Computing Machinery,
+1381–1394. https://doi.org/10.1145/3712285.3759864
+14
+
+CODA: Algorithm-Hardware Co-design for Edge Video Diffusion
+via NMP-Enabled Compute-Cache Operator Disaggregation
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+[52] P. J. Meaney, L. D. Curley, G. D. Gilda, M. R. Hodges, D. J. Buerkle, R. D. Siegl,
+and R. K. Dong. 2015. The IBM z13 memory subsystem for big data. IBM Journal
+of Research and Development 59, 4/5 (2015), 4:1–4:11. https://doi.org/10.1147/JRD.
+2015.2429031
+[53] Elvis Nava, Seijin Kobayashi, Yifei Yin, Robert K. Katzschmann, and Benjamin F.
+Grewe. 2023. Meta-Learning via Classifier(-free) Diffusion Guidance.
+https:
+//doi.org/10.48550/arXiv.2210.08942 arXiv:2210.08942 [cs].
+[54] Shen Nie, Fengqi Zhu, Zebin You, Xiaolu Zhang, Jingyang Ou, Jun Hu, JUN ZHOU,
+Yankai Lin, Ji-Rong Wen, and Chongxuan Li. 2025. Large Language Diffusion
+Models. In The Thirty-ninth Annual Conference on Neural Information Processing
+Systems. https://openreview.net/forum?id=KnqiC0znVF
+[55] OpenAI. 2026. Sora 2: Video Generation Models as World Simulators. https:
+//openai.com/index/sora-2/.
+[56] Jaehyun Park, Jaewan Choi, Kwanhee Kyung, Michael Jaemin Kim, Yongsuk
+Kwon, Nam Sung Kim, and Jung Ho Ahn. 2024. AttAcc! Unleashing the Power of
+PIM for Batched Transformer-based Generative Model Inference. In Proceedings of
+the 29th ACM International Conference on Architectural Support for Programming
+Languages and Operating Systems, Volume 2 (ASPLOS ’24, Vol. 2). Association for
+Computing Machinery, New York, NY, USA, 103–119. https://doi.org/10.1145/
+3620665.3640422
+[57] William Peebles and Saining Xie. 2023. Scalable Diffusion Models with Trans-
+formers. arXiv:2212.09748 [cs.CV] https://arxiv.org/abs/2212.09748
+[58] Prin Phunyaphibarn, Phillip Y Lee, Jaihoon Kim, and Minhyuk Sung. 2025. Un-
+conditional Priors Matter! Improving Conditional Generation of Fine-Tuned
+Diffusion Models. (2025).
+[59] Lucas Relic, Roberto Azevedo, Yang Zhang, Markus Gross, and Christopher
+Schroers. 2025. Bridging the Gap between Gaussian Diffusion Models and Uni-
+versal Quantization for Image Compression. https://doi.org/10.48550/arXiv.2504.
+02579 arXiv:2504.02579 [eess].
+[60] Shreshth Saini, Shashank Gupta, and Alan Bovik. 2025. Rectified CFG++ for
+Flow Based Models. In The Thirty-ninth Annual Conference on Neural Information
+Processing Systems. https://openreview.net/forum?id=NosdT1FHPv
+[61] Pratheba Selvaraju, Tianyu Ding, Tianyi Chen, Ilya Zharkov, and Luming Liang.
+2024. FORA: Fast-Forward Caching in Diffusion Transformer Acceleration. https:
+//doi.org/10.48550/arXiv.2407.01425 arXiv:2407.01425 [cs].
+[62] VideoSys Team. 2024. VideoSys: An Easy and Efficient System for Video Genera-
+tion. https://github.com/NUS-HPC-AI-Lab/VideoSys
+[63] Peter JM Van Laarhoven, Emile HL Aarts, Peter JM van Laarhoven, and Emile HL
+Aarts. 1987. Simulated annealing. Springer.
+[64] DefTruth vipshop.com. 2025. Cache-DiT: A PyTorch-native Inference Engine
+with Hybrid Cache Acceleration and Massive Parallelism for DiTs.
+https:
+//github.com/vipshop/cache-dit.git
+[65] Team Wan, Ang Wang, Baole Ai, Bin Wen, Chaojie Mao, Chen-Wei Xie, Di Chen,
+Feiwu Yu, Haiming Zhao, Jianxiao Yang, Jianyuan Zeng, Jiayu Wang, Jingfeng
+Zhang, Jingren Zhou, Jinkai Wang, Jixuan Chen, Kai Zhu, Kang Zhao, Keyu
+Yan, Lianghua Huang, Mengyang Feng, Ningyi Zhang, Pandeng Li, Pingyu Wu,
+Ruihang Chu, Ruili Feng, Shiwei Zhang, Siyang Sun, Tao Fang, Tianxing Wang,
+Tianyi Gui, Tingyu Weng, Tong Shen, Wei Lin, Wei Wang, Wei Wang, Wenmeng
+Zhou, Wente Wang, Wenting Shen, Wenyuan Yu, Xianzhong Shi, Xiaoming
+Huang, Xin Xu, Yan Kou, Yangyu Lv, Yifei Li, Yijing Liu, Yiming Wang, Yingya
+Zhang, Yitong Huang, Yong Li, You Wu, Yu Liu, Yulin Pan, Yun Zheng, Yuntao
+Hong, Yupeng Shi, Yutong Feng, Zeyinzi Jiang, Zhen Han, Zhi-Fan Wu, and
+Ziyu Liu. 2025. Wan: Open and Advanced Large-Scale Video Generative Models.
+https://doi.org/10.48550/arXiv.2503.20314 arXiv:2503.20314 [cs].
+[66] Chengyue Wu, Hao Zhang, Shuchen Xue, Zhijian Liu, Shizhe Diao, Ligeng Zhu,
+Ping Luo, Song Han, and Enze Xie. 2026. Fast-dLLM: Training-free Acceleration
+of Diffusion LLM by Enabling KV Cache and Parallel Decoding. In The Fourteenth
+International Conference on Learning Representations. https://openreview.net/
+forum?id=3Z3Is6hnOT
+[67] Zihao Wu. 2025. InvarDiff: Cross-Scale Invariance Caching for Accelerated
+Diffusion Models. https://doi.org/10.48550/arXiv.2512.05134 arXiv:2512.05134
+[cs]
+[68] Haocheng Xi, Shuo Yang, Yilong Zhao, Chenfeng Xu, Muyang Li, Xiuyu Li, Yujun
+Lin, Han Cai, Jintao Zhang, Dacheng Li, et al. 2025. Sparse VideoGen: Accelerating
+Video Diffusion Transformers with Spatial-Temporal Sparsity. International
+Conference on Machine Learning (2025).
+[69] Zhen Xing, Qijun Feng, Haoran Chen, Qi Dai, Han Hu, Hang Xu, Zuxuan Wu,
+and Yu-Gang Jiang. 2024. A Survey on Video Diffusion Models. https://doi.org/
+10.48550/arXiv.2310.10647 arXiv:2310.10647 [cs].
+[70] Zhuoyi Yang, Jiayan Teng, Wendi Zheng, Ming Ding, Shiyu Huang, Jiazheng Xu,
+Yuanming Yang, Wenyi Hong, Xiaohan Zhang, Guanyu Feng, Da Yin, Yuxuan
+Zhang, Weihan Wang, Yean Cheng, Bin Xu, Xiaotao Gu, Yuxiao Dong, and
+Jie Tang. 2025. CogVideoX: Text-to-Video Diffusion Models with An Expert
+Transformer. https://doi.org/10.48550/arXiv.2408.06072 arXiv:2408.06072 [cs].
+[71] Yuzhe Yao, Feng Tian, Jun Chen, Haonan Lin, Guang Dai, Yong Liu, and Jingdong
+Wang. 2024. Timestep-Aware Correction for Quantized Diffusion Models. https:
+//doi.org/10.48550/arXiv.2407.03917 arXiv:2407.03917 [cs].
+[72] Dingkun Zhang, Sijia Li, Chen Chen, Qingsong Xie, and Haonan Lu. 2025.
+LAPTOP-Diff: Layer Pruning and Normalized Distillation for Compressing Diffu-
+sion Models. arXiv:2404.11098 [cs.CV] https://arxiv.org/abs/2404.11098
+[73] Xuanlei Zhao, Xiaolong Jin, Kai Wang, and Yang You. 2025. Real-Time Video
+Generation with Pyramid Attention Broadcast. In The Thirteenth International
+Conference on Learning Representations.
+https://openreview.net/forum?id=
+hDBrQ4DApF
+[74] Yang Zhao, Yanwu Xu, Zhisheng Xiao, Haolin Jia, and Tingbo Hou. 2024. Mo-
+bileDiffusion: Instant Text-to-Image Generation on Mobile Devices. In Computer
+Vision – ECCV 2024: 18th European Conference, Milan, Italy, September 29–October
+4, 2024, Proceedings, Part LXII (Milan, Italy). Springer-Verlag, Berlin, Heidelberg,
+225–242. https://doi.org/10.1007/978-3-031-73033-7_13
+[75] Dongqi Zheng. 2025. Diffusion Models on the Edge: Challenges, Optimizations,
+and Applications. https://doi.org/10.48550/arXiv.2504.15298 arXiv:2504.15298
+[cs].
+[76] Zangwei Zheng, Xiangyu Peng, Tianji Yang, Chenhui Shen, Shenggui Li, Hongxin
+Liu, Yukun Zhou, Tianyi Li, and Yang You. 2024. Open-Sora: Democratizing
+Efficient Video Production for All.
+https://doi.org/10.48550/arXiv.2412.20404
+arXiv:2412.20404 [cs].
+[77] Zhe Zhou, Cong Li, Xuechao Wei, Xiaoyang Wang, and Guangyu Sun. 2023.
+GNNear: Accelerating Full-Batch Training of Graph Neural Networks with near-
+Memory Processing. In Proceedings of the International Conference on Parallel
+Architectures and Compilation Techniques (New York, NY, USA, 2023-01-27) (PACT
+’22). Association for Computing Machinery, 54–68.
+https://doi.org/10.1145/
+3559009.3569670
+[78] Chang Zou, Xuyang Liu, Ting Liu, Siteng Huang, and Linfeng Zhang.
+2025. Accelerating Diffusion Transformers with Token-wise Feature Caching.
+arXiv:2410.05317 [cs.LG] https://arxiv.org/abs/2410.05317
+15

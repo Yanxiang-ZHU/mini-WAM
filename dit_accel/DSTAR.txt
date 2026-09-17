@@ -1,0 +1,2608 @@
+DSTAR: Accelerating Diffusion Transformers via Spatial and
+Temporal Redundancy Reduction
+Chi Zhang
+School of Computer Science
+Shanghai Jiao Tong University
+Shanghai, China
+zhang-chi@sjtu.edu.cn
+Jieru Zhao∗
+School of Computer Science
+Shanghai Jiao Tong University
+Shanghai, China
+zhao-jieru@sjtu.edu.cn
+Yu Feng
+School of Computer Science
+Shanghai Jiao Tong University
+Shanghai, China
+y-feng@sjtu.edu.cn
+Chen Zhang
+School of Electronic Information and
+Electrical Engineering
+Shanghai Jiao Tong University
+Shanghai, China
+chenzhang.sjtu@sjtu.edu.cn
+Quan Chen
+School of Computer Science
+Shanghai Jiao Tong University
+Shanghai, China
+chen-quan@cs.sjtu.edu.cn
+Minyi Guo
+Guizhou Provincial Laboratory of Big
+Data, College of Computer Science
+and Technology, Guizhou University
+Guizhou, China
+School of Computer Science, SJTU
+Shanghai, China
+guo-my@cs.sjtu.edu.cn
+Abstract
+Diffusion Transformers (DiTs) have been widely used in many
+tasks, including image synthesis, video generation, and content
+editing. However, their multi-iteration inference process leads to
+performance inefficiency and high energy consumption. Existing
+acceleration methods primarily focus on reducing temporal redun-
+dancy between adjacent timesteps, but often overlook the specific
+features of DiTs. As a result, these approaches either suffer from
+great accuracy degradation or fail to achieve high efficiency.
+We present DSTAR, a software-hardware co-design framework
+that accelerates DiT inference by reducing spatial and temporal
+redundancy. At the algorithmic level, DSTAR introduces a fine-
+grained mixed-precision quantization method for differential acti-
+vations in linear operations, significantly increasing the proportion
+of low-bit computations. Additionally, DSTAR incorporates a sparse
+attention reuse mechanism to minimize redundant computation
+in attention layers. For architectural support, we design a special-
+ized hardware accelerator which achieves high efficiency in both
+latency and energy consumption. Evaluation on seven typical DiTs
+demonstrates that DSTAR achieves up to 7.33× latency speedup
+and 41.89× energy savings compared to an NVIDIA A100 GPU, and
+achieves up to 2.54× latency speedup and 3.68× energy savings
+compared to SOTA accelerators, without accuracy degradation.
+Keywords
+Diffusion Transformers, Redundancy, Quantization, Accelerators
+1
+Introduction
+The rapid advancement of artificial general intelligence (AGI) em-
+powers AI systems to generate diverse and realistic content. Re-
+cently, Diffusion Transformers (DiTs) have achieved state-of-the-art
+performance across various tasks, including multimedia synthesis
+[41], [7], [6], [28], content modification [18], and super-resolution
+∗Corresponding author.
+[12]. However, DiTs face significant inefficiency due to the multi-
+iteration inference process required by large-scale models. For ex-
+ample, Flux-1 [23], a cutting-edge image generation model with 12
+billion parameters, requires 924 TOPs to generate a 1K-resolution
+image in a 28-step inference process, consuming 25 seconds and
+7475 J on an Nvidia A100 GPU.
+To improve efficiency, various algorithmic optimizations have
+been explored. Some approaches [32, 47, 50] aim to reduce the
+number of timesteps in the diffusion process through stochastic
+methods and distillation techniques. Methods like [2, 31, 35, 52,
+53, 57] cache intermediate results of previous steps for reuse and
+reduce computation across scenarios ranging from edge to server-
+side deployment. While these approaches accelerate inference, they
+often lead to great degradation in the quality of generated content
+when applied to DiTs. For example, TokenCache [31] achieves a 2×
+speedup on A100 GPU but results in over a 5% drop in FID.
+Recent studies have explored software-hardware co-design strate-
+gies to accelerate the diffusion process with minimal degradation in
+model performance. In particular, activations generated at adjacent
+timesteps often exhibit high similarity, revealing substantial tem-
+poral redundancy. For linear layers, since the differences between
+adjacent timesteps, referred to as differential activations, are typi-
+cally small, they can be quantized to lower precision (e.g., 4 bits)
+[14, 19–21], or even set to zero [16], thereby reducing computational
+cost. Meanwhile, exploiting spatial redundancy, i.e., sparsity in at-
+tention layers, has received significant attention. Prior accelerators
+for transformers like BERT [40] leverage this sparsity by predicting
+important attention scores and skipping redundant computations
+[15, 33, 42, 55], thereby reducing the computational burden.
+Challenges. DiTs inherently possess characteristics of both the
+diffusion process and transformer models, creating substantial op-
+portunities to exploit temporal and spatial redundancies. However,
+fully leveraging these redundancies in DiTs is non-trivial due to sev-
+eral key challenges. For linear operations such as GEMM in FFNs,
+existing differential-based methods [19, 21] employ coarse-grained
+1
+arXiv:2607.15846v1  [cs.AR]  17 Jul 2026
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Chi Zhang, Jieru Zhao, Yu Feng, Chen Zhang, Quan Chen, and Minyi Guo
+21%
+25%
+24%
+26%
+26%
+26%
+23%
+15%
+37%
+36%
+39%
+22%
+2%
+6%
+18%
+47%
+42%
+40%
+38%
+52%
+72%
+68%
+59%
+38%
+DiT-XL-512
+PixArt-Sigma
+SD3.5-Medium
+SD3.5-Large
+Flux.1-dev-256
+Flux.1-dev-512
+Flux.1-dev-1k
+Flux.1-dev-2k
+5.8E+12
+6.2E+12
+1.0E+13
+2.9E+13
+1.9E+12
+7.2E+12
+3.3E+13
+2.0E+14
+0
+20
+40
+60
+80
+100
+Percentage of 
+Total Operations (%)
+Workload
+ FFN Layer  
+ Attention  
+ QKVO Proj  
+Total Operations
+Figure 1: Performance breakdown for different DiT models.
+outlier-aware quantization to quantize differential activations. How-
+ever, such coarse-grained schemes introduce high quantization er-
+rors when applied to DiTs, limiting the ability to compress large
+tensors into low-bit representations. Effectively quantizing as many
+differential activations as possible to low precision without com-
+promising generation quality remains a significant challenge.
+For attention operations, although sparse attention techniques
+have been explored in both traditional Transformers [15, 33, 42,
+55] and DiT models [16, 61], their prediction-based approaches
+introduce considerable overhead and fail to exploit the distinctive
+attention patterns of DiT. Moreover, temporal redundancy also
+exists within attention layers of DiTs. Existing methods either suffer
+from accuracy degradation [31] or are limited to specific attention
+heads [60]. Thus, effectively leveraging this redundancy presents a
+valuable yet underexplored opportunity.
+Our Solution. The performance bottlenecks in DiTs vary signif-
+icantly depending on the generation task, model scale, and input
+resolution, as shown in Fig. 1. In different DiTs, either the atten-
+tion or the FFN may dominate inference latency. This variation
+highlights the need for a comprehensive acceleration strategy that
+targets all major components of DiTs. We address it by reducing
+both spatial and temporal redundancy, and propose a co-design
+approach that integrates algorithmic and hardware optimizations.
+At the algorithm level, we introduce a fine-grained mixed-precision
+quantization method tailored for differential activations of linear
+operations like FFN, significantly increasing the proportion of val-
+ues that can be quantized to lower bits. Moreover, we propose a
+sparse attention reuse mechanism for attention operations, perform-
+ing block-wise sparse computation at each timestep and reusing
+attention scores from previous timesteps. Our algorithms reduce
+redundancy of DiTs without degrading generation quality.
+For architectural support, we incorporate a specialized hardware
+architecture which extends the TPU design by redesigning the func-
+tionality and arrangement of PEs and adding additional functional
+units. This architecture is co-designed with our algorithmic op-
+timizations, enabling high execution efficiency while preserving
+generation quality. Our contributions are summarized as follows:
+• We propose DSTAR, a software-hardware co-design frame-
+work that accelerates DiT inference by reducing both spatial
+and temporal redundancy.
+......
++
++
++
++
+-
+-
+-
+-
+Reverse Phase : Multi-step Denoising
+Forward Phase : Multi-step Noise Adding
+Attention
+FFN
+Linear 1
+Linear 2
+gelu
+QKV proj 
+Q @ K.T
+Softmax
+S @ V
+Out proj
+Gaussian
+Noise
+Encoder
+Prompt : A clean and well
+decorated bathroom
+Transformer Model
+Gaussian
+Noise
+Prediction 
+Noise
+VAE Decoder
+-
+Denoised
+Content
+Denoising Stage
+Encoding Stage
+Decoding Stage
+Generated
+Content
+Figure 2: The basic process of diffusion transformer.
+• We introduce a fine-grained differential quantization algo-
+rithm for linear operations and a sparse attention reuse mech-
+anism for efficient attention computation.
+• We provide a high-performance hardware accelerator to
+support our algorithmic optimizations.
+We evaluate DSTAR on seven typical DiT models spanning vari-
+ous generative tasks. Experiments show that DSTAR achieves up
+to 7.33× latency speedup and 41.89× energy savings compared to
+an NVIDIA A100 GPU, and achieves up to 2.54× latency speedup
+and 3.68× energy savings compared to state-of-the-art accelerators,
+without accuracy degradation.
+2
+Background and Motivation
+2.1
+Diffusion Transformer
+Diffusion is a generative process designed to sample from a target
+data distribution, such as images or videos, enabling the generation
+of corresponding content. As shown in Fig. 2, taking the example of
+image generation, the diffusion process is formulated as a Markov
+process with a forward phase and a reverse phase.
+In the forward phase, a sequence of Gaussian noise perturbations
+𝜖𝑡is progressively added to the original image 𝑋0, generating a se-
+quence of images, 𝑋0,𝑋1, . . . ,𝑋𝑛. When 𝑛is sufficiently large, 𝑋0 is
+transformed into pure Gaussian noise, i.e., 𝑋𝑛∼N (0, 𝐼). Mathemat-
+ically, when the noise added in the forward phase is small enough,
+the conditional probability of the inverse noise 𝑃(𝜖𝑡|𝑋𝑡,𝑋0) can be
+well approximated by the forward noise distribution 𝑃(𝜖𝑡−1|𝑋𝑡−1).
+This property enables the restoration of the original data distribu-
+tion by iteratively subtracting noise from the Gaussian distribution,
+as shown in the reverse denoising phase.
+The generation pipeline is depicted in Fig. 2. Conditioning inputs,
+such as class labels, text prompts, or images, are first encoded using
+specialized encoders, such as CLIP [43] for vision-language tasks
+or T5 [44] for text processing. These encoded conditions, along
+with an initial Gaussian noise sample, serve as inputs to the noise
+prediction model. The denoising phase is then executed, iteratively
+refining the noisy input through multiple denoising steps based
+2
+
+DSTAR: Accelerating Diffusion Transformers via Spatial and Temporal Redundancy Reduction
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Table 1: Comparison of representative accelerators.
+Accelerators
+Differential Quantization for Linear Layer
+Pruning for Attention Layer
+Granularity
+Precision Support
+Avg.
+Bit-width
+HW
+Friendly
+Granularity
+Overhead
+Reuse
+Pruned
+Ratio
+Cambricon-D [21]
+Channel-wise
+Low Magnitude : INT4
+High Magnitude : FP16
+7.2
+✓
+−
+−
+✗
+0%
+EXION [16]
+Element-wise
+Low Magnitude : Set to 0
+High Magnitude : FP16
+11.2
+✗
+Top-K Per-Q
+High
+✗
+17%
+DITTO [19]
+Channel-wise
+Low Magnitude : INT4
+High Magnitude : INT8
+5.4
+✓
+−
+−
+✗
+0%
+Ours
+Sub-channel-wise
+Adaptive : INT2 / INT4
+/ INT6 / INT8
+4.3
+✓
+Block-wise
+Low
+✓
+37%
+on the model’s prediction. For models operating in a latent space,
+a variational autoencoder (VAE) is employed at the final stage to
+decode the latent representation into generated content.
+The denoising model is the core of the diffusion process and
+dominates inference latency due to the need for multiple itera-
+tions. Specifically, DiTs have become the de facto choice for recent
+diffusion-based applications. A DiT typically consists of several
+Transformer blocks, each comprising an attention layer and a FFN
+layer. Both layers involve several matrix multiplications and non-
+linear arithmetic operations.
+Performance Breakdown. Fig. 1 presents a performance break-
+down of main computational layers across different workloads and
+different DiT models. It indicates that the bottlenecks in DiTs vary
+depending on the task (image vs. video generation), model scaling
+(small vs. large models), and input size (image and video resolution).
+Both attention and FFN layers could dominate the inference latency,
+highlighting the necessity of accelerating all major components.
+Existing accelerators are primarily designed for UNet [19, 21, 62]
+or small-scale DiTs with fewer layers and lower generation resolu-
+tions such as DiT-XL [16, 19], and lack the flexibility to efficiently
+support a wide range of DiTs (Sec. 2.2 and Sec. 2.3). To address
+this issue, we accelerate both linear and non-linear operations in
+DiT by eliminating spatial and temporal redundancy, and introduce
+an efficient software-hardware co-design framework to enhance
+performance of diverse DiT models.
+2.2
+Temporal Redundancy for Linear Layers
+Temporal Redundancy. Activations generated in adjacent steps
+often exhibit high similarity due to minimal noise addition, indicat-
+ing high temporal redundancy [19, 21].
+To reduce temporal redundancy, differential-based inference is
+applied to linear layers such as FFN. Consider a linear transforma-
+tion such as 𝑦= 𝑘𝑥+ 𝑏, where 𝑘is constant. When an increment
+Δ𝑥is applied to 𝑥, the updated value 𝑦′ can be computed using the
+linearity property:
+𝑦′ = 𝑦+ Δ𝑦= 𝑦+ 𝑘Δ𝑥.
+(1)
+Since Δ𝑥is typically small, it can be either quantized to fewer bits,
+or directly set to zero, thus simplifying computation.
+Previous research have leveraged this idea to accelerate diffusion
+models. For example, EXION [16] directly sets differential activa-
+tions of FNN layers to zeros, achieving good performance on UNet.
+However, as shown in Table 1, it achieves an average bit-width of
+11.2 when applied to DiT models. Moreover, it introduces additional
+hardware overhead due to the need of processing tensors that con-
+tain unstructured zeros produced by their algorithm. Differential-
+based quantization is a superior alternative to reduce temporal
+redundancy for UNet [14, 21] and DiT [19], and selecting an appro-
+priate quantization granularity is crucial to balance accuracy and
+efficiency. Similar to OliVe [13] and MSQ [45] for LLM, Cambricon-
+D [21] adopts a coarse-grained outlier-aware quantization strategy
+for UNet that partitions activations into two groups—outliers and
+normal values—and quantizes them separately. However, it intro-
+duces high quantization error when applied to DiTs. DITTO [19]
+supports Per-Channel Quantization (PCQ) [11, 22, 24, 26, 59] for
+DiT, which decomposes activations along the channel dimension
+into multiple sub-tensors (each contain a 1-D channel), each quan-
+tized with its own precision and scale. However, our experiments
+show that PCQ still introduces substantial quantization error when
+applied to the differential activations of large-scale DiT models
+such as Stable Diffusion 3.5 [46] and Flux.1-Dev [23], resulting in
+a much higher average bit-width requirement, as reflected in the
+average bit-widths of DITTO in Table 1.
+Observation and Motivation. To quantize differential acti-
+vations to low bit-widths without incurring significant accuracy
+degradation, we first analyze their outlier distribution patterns, as
+shown in Fig. 4. In general, outliers are dispersed across channels, but
+within each channel they exhibit strong clustering. This motivates the
+use of finer-grained quantization that exploits the intra-channel local-
+ity of outliers, enabling both higher efficiency and better generation
+quality. However, such fine granularity poses additional challenges
+for hardware efficiency. To reconcile this trade-off, we propose a
+fine-grained mixed-precision differential quantization algorithm
+together with a hardware architecture tailored to support it. Details
+are provided in Sections 3.1 and 4.
+2.3
+Spatial-Temporal Redundancy for Attention
+Spatial Redundancy. Sparse attention techniques accelerate atten-
+tion computation by reducing spatial redundancy. Due to the nature
+of the softmax, which pushes small values toward zero, the atten-
+tion score matrix naturally becomes sparse. Some methods employ
+dynamic prediction to estimate the sparsity pattern of the score
+matrix at runtime for both traditional Transformers [42, 55] and
+3
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Chi Zhang, Jieru Zhao, Yu Feng, Chen Zhang, Quan Chen, and Minyi Guo
+Diffusion Transformer
+Sparse
+(Spatial)
+ Reuse
+(Temporal)
+Unstructured
+Outliers ☹︎
+Activation
+(Timestep T)
+3.2 Sparse Attention Reuse
+Specialized Hardware Architecture
+ Algorithm Optimization
+Structured Value
+Range ☺︎
+-
+Activation
+(Timestep T-1)
+3.1 Fine Grained Mixed-Precision
+Differential Quantization
+Figure 3: Overview of the DSTAR algorithmic optimization.
+DiTs [16, 61]. For example, as shown in Table 1, EXION adopts an
+approximate top-𝑘strategy that predict the largest 𝑘values for each
+query and sets the rest to zero. However, such prediction introduces
+additional latency, area, and power overhead. Alternatively, static
+sparsity patterns—such as attention sinks, window attention, and
+global attention [3, 25, 58]—are widely used in traditional Trans-
+formers to reduce computation. Unfortunately, they are not directly
+applicable to DiTs, which exhibit distinct sparsity characteristics.
+In addition, some works [62] explore token-pruning methods for
+specific models and tasks, such as image editing; however, they do
+not generalize well to generative workloads in DiTs.
+Temporal Redundancy. Temporal redundancy also exists in
+attention operations within DiTs, stemming from the temporal sim-
+ilarity between adjacent steps. As with linear layers, differential-
+based acceleration can in principle be applied to attention. However,
+its effectiveness is limited because differential activations in atten-
+tion layers are more sensitive to quantization errors, degrading
+model performance greatly. Consequently, direct activation reuse is
+more suitable for attention. The key challenge lies in determining
+which values can be safely reused across steps without compro-
+mising generation quality. For instance, some approaches reuse
+attention output tokens but incurs substantial accuracy degrada-
+tion [31]. DiTFastAttn [60] observes that reusing attention outputs
+for heads exhibiting a diagonal pattern introduces minimal error.
+Nonetheless, it is restricted to heads with such patterns, which are
+relatively scarce in DiTs.
+Observation and Motivation. To reduce spatial and temporal
+redundancies for attention, we identify a simple yet effective spar-
+sity pattern in DiTs, as shown in Fig. 7. In particular, a block-wise
+sparsity pattern emerges within each score matrix, reflecting spatial
+structure, while this pattern exhibit similarity across steps, capturing
+temporal correlation. Therefore, we design a pattern-aware strat-
+egy that performs block-wise sparse computation at each step and
+reuses attention scores from the previous step, as detailed in Sections
+3.2 and 4. Notably, we observe that the L1 norm of the differences in
+attention components between adjacent steps exhibits vastly differ-
+ent value ranges, indicating that they have different tolerances to
+reusing error. For example, the value matrix changes significantly
+between steps. In contrast, due to the normalization effect of soft-
+max, attention scores are compressed into a narrow range [0, 1],
+making them less sensitive to final result and hence a suitable target
+for exploiting temporal redundancy in attention.
+Token
+1.0 -
+Observation 1：Inter-Channel Scattering
+Channel
+①
+②
+Observation 2 ：
+Intra-Channel
+Clustering
+0.0 -
+Figure 4: Distribution of outliers in differential activations.
+3
+Algorithm Optimization
+To fully exploit spatial and temporal redundancies in DiTs, we
+propose two algorithmic optimizations that target linear layers like
+FFN and attention layers, respectively, as shown in Fig. 3. We first
+introduce a fine-grained mixed-precision differential quantization
+(FMDQ) scheme to improve hardware efficiency while maintaining
+accuracy. Next, we propose a sparse attention reuse (SAR) scheme
+that exploits spatial sparsity and temporal similarity in attention.
+3.1
+Fine-Grained Mixed-Precision Quantization
+Key Idea. Take the Stable Diffusion 3.5 Medium model [46] as an
+example. Fig. 4 shows the binary heatmap of differential activation
+values of layer 23 between step 0 and step 1, indicating the position
+of outliers in the tensor. We can obtain two key observations. First,
+outliers are unevenly distributed across most channels, posing a sig-
+nificant challenge for coarse-grained quantization scheme like PCQ
+[11, 22, 24, 26, 59], which is originally designed for cases where
+outliers are concentrated within specific channels. For the model
+in Fig. 4, applying PCQ means that even if a channel contains only
+a few outliers, the entire channel must still be processed at high
+precision, substantially reducing quantization efficiency. Second,
+outliers within each channel often cluster among adjacent tokens,
+presenting an opportunity for a finer-grained quantization strategy,
+namely, separating outliers from normal values within each channel
+to enable more efficient computation.
+Computation Flow. Fig. 5 illustrates the computation flow of
+our FMDQ method. First, we divide the differential activation matrix
+into fine-grained tiles along the token dimension, and then apply
+an on-the-fly power-of-two (PoT)-based quantization scheme for
+each channel of each tile, i.e., sub-channels (❶). Next, we decom-
+pose mixed-precision sub-channels into several slices represented
+with a unified precision (❷). Subsequently, we reorder sub-channels
+based on their PoT so that those sharing the same PoT are placed
+adjacently, thereby reducing stalls and improving hardware effi-
+ciency (❸). After that, the number of required shifting operations
+are calculated based on PoTs, and we encode the data along with
+meta-information into a compact format for memory efficiency (❹).
+Finally, the quantized data is streamed to the computation mod-
+ule of our specialized accelerator, where runtime requantization is
+conducted to enable efficient partial sum accumulation (❺).
+❶On-the-Fly PoT-Based Quantization. Based on our obser-
+vation from Fig. 4, we divide the tensor along the token dimension
+into several tiles, since outliers usually cluster to adjacent tokens.
+As shown in Fig. 5, the colored and blank tensors represent two
+tiles. Within each tile, we apply mixed-precision quantization at
+4
+
+DSTAR: Accelerating Diffusion Transformers via Spatial and Temporal Redundancy Reduction
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Quantization
+Decomposing
+70
+01
+01
+Reordering
+❶
+❹
+Weight
+Differential
+Activation
+8-Bit
+4-Bit
+FPoT
+4
+6
+7
+0.7
+1.9
+0.3
+1.4 8.7
+9.2
+1
+0
+70
+74
+4
+3
+1
+0
+1
+1
+0
+0
+1
+Index
+0
+2
+2
+0
+1
+2
+❷
+❸
+74
+01
+10
+=
+=
+1
+0
+1
+0
+=
+=
+Encoding
+Channel
+Token
+Shift
+Index
+FPoT=5
+FPoT=4
+FPoT=4
+Data
+Shift / Index
+Meta
+Memory 
+Runtime Requantization
+Activation
+❺
+❺
+❹
+❸
+❷
+❶
+Base = 
+Tile 0
+Tile 1
+00
+10
+00 10
+1
+2
+2
+2
+1
+2
+2
+2
+7
+5
+2
+2
+1
+1
+1
+2
+3
+0
+0
+2
+1
+2
+2
+2
+7
+5
+2
+2
+Consecutive 2-bit
+Slices
+6
+8
+6
+2
+0
+1
+4
+1
+2
+1
+4
+1
+0
+0
+4
+1
+2
+1
+6
+2
+0
+1
+1
+1
+0
+2
+2
+0
+0
+2
+1
+2
+2
+2
+1
+1
+2
+2
+1
+1
+0
+0
+0
+1
+2
+1
+1
+2
+0
+1
+2-Bit
+Figure 5: Computation flow of fine-grained mixed-precision differential quantization.
+the per-channel granularity, assigning INT2, INT4, INT6, or INT8
+precision depending on the value range of each channel. The reason
+for supporting 2-bit incremental precision is that the differential
+activations in DiT exhibit significant variation. Across different
+steps, the first and last steps tend to change more sharply, whereas
+intermediate steps show relatively small differences. Moreover, the
+number of inference steps varies substantially across DiT models:
+some models require more than 50 steps, introducing consider-
+able redundancy, while others need only around 4 steps, where
+activation values change much more rapidly. With fine-grained
+mixed-precision support, FMDQ can effectively adapt to a wide
+range of DiT models and inference configurations.
+To efficiently determine the precision and scale for each sub-
+channel and perform quantization, we propose an on-the-fly PoT-
+based linear symmetric quantization scheme. PoT quantization [27]
+is an efficient method where quantization scales are restricted to
+powers of two relative to a base scale, allowing requantization to
+be efficiently implemented using bit-shift operations on hardware.
+Let the maximum absolute value of each sub-channel be denoted
+as 𝑀𝑖. We first determine the quantization precision by binning
+𝑀𝑖(i.e., assigning a value to a range) using predefined thresholds
+𝑇ℎ𝑟0,𝑇ℎ𝑟1, . . .. These thresholds are defined as a series 𝑇ℎ𝑟0 × 22𝑁,
+where each threshold is 22 times larger than the previous one, corre-
+sponding to the value ranges representable by different precisions
+(e.g., 2-bit, 4-bit, etc.). By tuning 𝑇ℎ𝑟0, we can encourage the selec-
+tion of lower precision while maintaining negligible accuracy loss,
+as demonstrated in Sec. 5.2.
+Let the maximum representable value for the selected preci-
+sion be denoted as 𝑃𝐶𝑒𝑖𝑙. Our PoT-based quantization selects the
+minimum of 𝑀𝑖across all sub-channels as 𝑏𝑎𝑠𝑒, and determines
+quantization scales 𝑠𝑖of each sub-channel with:
+𝑠𝑖=
+𝑃𝐶𝑒𝑖𝑙
+𝑏𝑎𝑠𝑒× 2𝑃𝑜𝑇𝑖
+(2)
+where
+𝑃𝑜𝑇𝑖=
+
+log2
+ 𝑀𝑖
+𝑏𝑎𝑠𝑒
+
+.
+(3)
+For convenience, we further define
+𝐹𝑃𝑜𝑇𝑖= log2
+
+𝑃𝐶𝑒𝑖𝑙
+𝑏𝑎𝑠𝑒2 × 2𝑃𝑜𝑇𝑖
+
+,
+(4)
+which fuses the information of precision (𝑃𝐶𝑒𝑖𝑙) and PoT value
+(𝑃𝑜𝑇𝑖), serving as a unified indicator for requantization across quan-
+tized values with different precisions and scales. Accordingly, the
+scale can then be simplified as
+𝑠𝑖= 𝑏𝑎𝑠𝑒× 2𝐹𝑃𝑜𝑇𝑖.
+(5)
+The PoT-based quantization relies on finding 𝑀𝑖and 𝑏𝑎𝑠𝑒, where
+𝑀𝑖is the maximum value in a certain sub-channel (usually 64 to
+256 elements). This is easy to store in on-chip memory. However,
+determining 𝑏𝑎𝑠𝑒requires finding the global minimum of 𝑀𝑖across
+all sub-channels. This process doubles memory accesses and latency,
+compared to non-PoT quantization which depends only on local
+value ranges, as it requires at least two passes over the data.
+Our key insight is that using a predefined static 𝑏𝑎𝑠𝑒, selected
+through dataset profiling, eliminates the need to compute the global
+minimum at runtime. Once 𝑀𝑖of a sub-channel is obtained, a
+threshold-based method can be applied to determine the quan-
+tization precision (2-bit, 4-bit, 6-bit, or 8-bit) for that sub-channel.
+Subsequently, 𝑃𝑜𝑇, 𝐹𝑃𝑜𝑇and the quantization scale can be directly
+derived from Eq. 3, Eq. 4 and Eq. 5, thereby enabling efficient on-
+the-fly quantization and meta-information generation. Experiments
+demonstrate that this approach achieves accuracy comparable to
+that of using the dynamic global minimum. Moreover, since both
+the 𝑏𝑎𝑠𝑒and thresholds for different precisions are fixed, the PoT
+and precision can be efficiently determined by classifying values
+into predefined ranges, i.e., through a bin operation. For example,
+consider the first sub-channel of the tensor in Fig. 5❶, where the
+maximum absolute value is 𝑀1 = 0.7. Suppose the threshold for
+2-bit quantization is set to 20. Since 𝑀1 lies within the range [0, 20],
+it is assigned to 2-bit quantization. In this case, 𝑃𝐶𝑒𝑖𝑙= 1. Given
+that 𝑏𝑎𝑠𝑒is set to 2−4 in this example, we can obtain 𝑃𝑜𝑇= 4,
+𝐹𝑃𝑜𝑇= 4, and 𝑠𝑖= 1 with Eq. 3 to Eq. 5. Note that all values in the
+interval [0, 20] share the same FPoT and scale. These parameters
+can be directly retrieved from a precomputed lookup table.
+Once the quantization scale obtained, all the values in the sub-
+channel can be quantized to the corresponding precision.
+❷Sub-Channel Decomposition. Handling mixed-precision
+values introduces hardware inefficiency due to the imbalanced
+utilization of PEs [59]. This problem is further amplified in the
+diffusion process, where activation value ranges vary significantly
+across steps and layers.
+To simplify the hardware architecture and improve efficiency, we
+decompose each sub-channel into several unified 2-bit slices. Con-
+sider a sub-channel 𝐴consisting of 64 elements, each represented
+in 8 bits. This sub-channel can be expressed as
+𝐴= (Slice[3] ≪6) + (Slice[2] ≪4) + (Slice[1] ≪2) + Slice[0],
+5
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Chi Zhang, Jieru Zhao, Yu Feng, Chen Zhang, Quan Chen, and Minyi Guo
+2
+4
+x
+2
+1
+4
+1
+0010
+0100
+x
+=
+=
++
+<<
+1
+0100
++
+1000
+1
+1
+x
+0110
+Quantized 
+Differential Activation
+Weight
+1
+2
+FPoT
+Cycle 1
+Cycle 2
+# Shifting Operations = 
+ = 1
+Channel
+1
+Channel
+2
+Figure 6: Illustration of requantization: shifting operations
+are required when accumulating partial sums.
+where Slice[𝑛] denotes a 64-element vector containing the𝑛-th 2-bit
+component of A. We then replace 𝐴with multiple slices. However,
+a direct replacement leads to incorrect results for matrix multipli-
+cation. For example,
+𝐴· 𝐵=  (Slice[1] ≪2) + Slice[0] · 𝐵≠Slice[1] · 𝐵+ Slice[0] · 𝐵.
+To address this, we adjust the 𝐹𝑃𝑜𝑇as follows: no adjustment is
+required for Slice[0], while for Slice[1], Slice[2] and Slice[3], 𝐹𝑃𝑜𝑇
+values must be decreased by 2, 4, and 6, respectively. This ensures
+that during the following partial-sum accumulation, each slice is
+effectively shifted to its correct position. An example of this decom-
+position is illustrated in Fig. 5❷, where the third sub-channel with
+values 70 and 74 is decomposed into four separate slices following
+the described method.
+To validate correctness, we take the value 70 in Fig. 5❷as an ex-
+ample, which is decomposed into 1 (Slice[3]), 0 (Slice[2]), 1 (Slice[1]),
+and 2 (Slice[0]), with corresponding 𝐹𝑃𝑜𝑇values of 1, 3, 5, and
+7, respectively. To compute 70 × 𝑤, we perform four iterations:
+first, compute 1 × 𝑤= 𝑤(i.e., 𝑆𝑙𝑖𝑐𝑒[3] × 𝑤); second, compute
+(𝑤≪2) + 0 × 𝑤= 4𝑤(i.e., + = 𝑆𝑙𝑖𝑐𝑒[2] × 𝑤). The left shift by
+2 corresponds to a requantization step (Fig. 6), derived from the
+FPoT difference ΔFPoT = 3 −1 = 2. This process continues for
+the remaining slices, and we can ultimately verify that the correct
+result 70𝑤is obtained.
+❸Sub-Channel Reordering, ❹Encoding and ❺Requan-
+tization. After unifying precision, it is necessary to cluster sub-
+channels with identical FPoTs to enable efficient runtime requanti-
+zation [24]. As shown in Fig. 6, consider two quantized differential
+activations that are multiplied by weights to produce partial sums
+(0010 and 0100). If their FPoTs differ, indicating different quantiza-
+tion scales, shifting operations are required to align them before
+accumulation. This process, known as requantization, involves ad-
+justing partial sums by the difference in FPoT to ensure correctness.
+Our key idea is to group sub-channels with identical FPoTs and
+reorder them based on FPoT magnitudes, thereby minimizing the
+number of shifting operations during partial-sum accumulation. We
+propose a reordering scheme (❸) in which all 2-bit slices, together
+with their FPoT and indices, are sorted using a bitonic sorting
+network. Thanks to the high parallelism of the on-chip sorter in
+our architecture, the entire sorting process can be performed on-
+the-fly, making it highly efficient. After reordering, multiplications
+and partial-sum accumulations are executed in ascending order of
+FPoT, which effectively reduces the requantization cost.
+Layer 19
+Layer 19
+Similarity
+(Temporal )
+Block-Wise 
+Sparsity 
+(Spatial) 
+Timestep 0
+Timestep 2
+Figure 7: The sparsity pattern of the attention score matrices
+at different steps for the SD3.5-Medium model [46].
+Timestep N
+(Cached Step) 
+Timestep N - 1
+(Reused Step)
+Reuse
+with Mask
+Datasets
+Attention Pattern Profile
+0.0 0.8 0.2
+0.6 0.4 0.0
+0.1 0.8 0.1
+Prune
+Threshold 
+= 0.4
+Static Profiling
+Dynamic Reuse
+0.2 0.6 0.2
+0.8 0.0 0.3
+0.1 0.8 0.1
+0.1 0.7 0.2
+0.4 0.2 0.1
+0.1 0.8 0.1
+Attention Block N
+Attention Block N
+Denosing
+Attention Matrix
+Block
+Calculate Average Importance
+Figure 8: Illustration of sparse attention reuse.
+During encoding (❹), FPoT values are converted into the number
+of shifting operations, calculated as the difference between adja-
+cent FPoTs. The quantized data, along with its meta-information,
+including channel indices and the number of shifts, is encoded and
+stored in consecutive memory locations. Channel indices are used
+to retrieve the correct weights during computation. All the data
+and its meta-information are streamed into the computation core
+of DSTAR, enabling efficient runtime requantization (❺).
+3.2
+Sparse Attention Reuse
+We identify a simple yet effective sparsity pattern, as shown in
+Fig. 7. A block-wise sparsity pattern appears in each score matrix,
+demonstrating spatial redundancy, and these sparse blocks consis-
+tently appear in the same positions of the score matrix, regardless of
+input variations. We attribute this to DiTs learning inductive biases
+aligned with the structure of image or video data. Across different
+timesteps, the sparsity patterns exhibit notable temporal similarity
+at the same layer between adjacent steps. Therefore, the block-
+wise sparse attention scores can be reused, reducing computational
+overhead. However, this approximation introduces accumulated
+errors across timesteps. To mitigate this, we periodically recompute
+attention scores every 𝑛steps to maintain model accuracy.
+Approach. Based on our observations, we propose Sparse Atten-
+tion Reuse (SAR), a pattern-aware strategy designed to accelerate
+attention in DiTs. SAR performs block-wise sparse computation at
+each step (spatial) and reuses attention scores from the previous
+step (temporal). The workflow, shown in Fig. 8, consists of two
+stages: static profiling and dynamic reuse. During profiling, the
+model is executed on various inputs from the dataset, using dif-
+ferent random seeds, and attention scores are collected. Based on
+observed patterns, the score matrix is divided into blocks and the
+statistical importance of each block is computed by summing all
+6
+
+DSTAR: Accelerating Diffusion Transformers via Spatial and Temporal Redundancy Reduction
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+ Network On-Chip (NoC) 
+Scratchpad (512KB)
+External Memory
+Global Instruction Buffer
+(4KB)
+Synchronization
+Controller
+DMA Controller
+Global
+Controller
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+PE
+...
+...
+...
+ Mixed-Precision Matrix Multiplication Unit (MPU)
+x64
+x64
+Accumulation Unit
+Instruction Decoder & Controller
+Mixed-Precision Processing Core (MPC)
+Instruction Buffer (4KB)
+Memory Controller (AXI Interface)
+Unified Buffer (80KB, x10 Bank)
+Inverse Quantization Unit
+Quantization Processing Unit (QPU)
+Vector Processing Unit (VPU)
+Element-Wise (None-Linear) Unit
+Vector-Scalar Product Unit
+Reduction Unit
+Control Unit
+Figure 9: Hardware architecture of DSTAR.
+attention scores within it. As illustrated in Fig. 8, these block-wise
+importance values are then averaged to obtain the final importance
+score. Then blocks with importance score that fall below a prede-
+fined threshold are pruned, generating a block-wise sparse attention
+mask which will guide computation during inference. Experiments
+show that the profiling process is highly dependent on model weight
+and the number of steps. Each time one of these factors changes,
+re-profiling is required. However, in practical scenarios, they are
+typically fixed, and the profiling incurs only minimal overhead,
+making it affordable and practical.
+During inference, we employ a cache-and-reuse mechanism. At
+the initial step (timestep 𝑁in Fig. 8), referred to as the cached step,
+we compute the sparse attention matrix and store it in the cache. In
+the subsequent 𝑛steps, termed reused steps, we leverage the cached
+score matrix to bypass the computation of the 𝑄and 𝐾projections,
+as well as softmax(𝑄𝐾𝑇). This caching and reuse process continues
+throughout the remainder of the inference.
+4
+Hardware Architecture
+4.1
+Overview
+Fig. 9 illustrates the overall hardware architecture. DSTAR adopts a
+multi-core design composed of multiple mixed-precision processing
+cores (MPCs), a global controller, and a scratchpad memory. All
+components are interconnected through the network on-chip (NoC),
+which interfaces with external memory.
+4.2
+Mixed-Precision Processing Core (MPC)
+Each MPC consists of several specialized processing units, includ-
+ing a mixed-precision matrix multiplication unit (MPU) for efficient
+tensor computation, a quantization processing unit (QPU) for our
+fine-grained quantization, and a vector processing unit (VPU) for
+other operations such as GELU and Softmax. The control unit or-
+chestrates the dataflow based on instructions and manages memory
+accesses, interfacing with scratchpad and external memory.
+Design of MPU. As shown in Fig. 9, MPU consists of a 64×64 PE
+array, an inverse quantization unit, and an accumulation unit. Fig. 10
+illustrates the microarchitecture of a PE in MPU. Each PE performs
+0
+act_slice [0]
+<< 
+weight [0]
+x
+Mux2
+8'b
+2'b
+Lane 0
+Lane 1 ( act_slice [1] x weight [1] )
+Lane 2 ( act_slice [2] x weight [2] )
+Lane 3 ( act_slice [3] x weight [3] )
++
++
+valid [0]
++
+Mux2
+partial sum (32'b)
+shift
+Left-Right 
+FLow in PE Array
+Top-Down
+FLow in PE Array
+Readout
+1
+Figure 10: Design of PE in MPU.
+FPoT
+Addr
+Index
+4
+ID
+0
+0x000
+0
+4
+1
+0x010
+4
+4
+2
+0x050
+7
+4
+3
+0x300
+9
+4
+4
+0x100
+1
+4
+5
+0x060
+6
+5
+6
+0x070
+1
+5
+7
+0x200
+5
+PE
+PE
+PE
+PE
+Systolic Array
+Slice 0
+Weight 0
+Weight 4
+Weight 7
+Weight 9
+Cycle 1
+(Systolic)
+Slice 1
+Slice 2
+Slice 3
+PE
+PE
+PE
+PE
+Systolic Array
+Slice 4
+Weight 1
+Weight 6
+Idle
+Idle
+Slice 5
+Idle
+Idle
+Psum
+<<
+Cycle 2 
+(ReQuant)
+Cycle 0
+(Systolic)
+PE
+PE
+Figure 11: Illustration of the execution of matrix multiplica-
+tion and accumulation (MMA) on MPU.
+a SIMD-4 inner product between a 2-bit activation slice vector and
+an 8-bit weight vector. It contains four 2-bit × 8-bit multipliers
+followed by three adders for accumulation. The activation slice
+input can be set to zero under the control of a valid signal, allowing
+blank values to be skipped. A 1-bit shifter is inserted in the partial
+sum datapath to enable PoT-based requantization.
+Fig. 11 illustrates an example of how matrix multiplication and
+accumulation (MMA) are executed on MPU. A sample block of
+meta-information for quantized differential activations is shown
+on the left. In each cycle, the MPU reads four meta-items and
+then fetches corresponding activation slices and weights according
+to the Addr and Index fields, respectively. Each activation slice
+contains 64×2-bit differential activations. The control unit in MPC
+then checks whether all FPoT items are identical. If so, the data is
+directly streamed into the systolic array, as illustrated in Cycle 0 of
+Fig. 11. In contrast, if not identical, for instance, in Cycle 1 where
+slice 5 and slice 6 have different FPoT values (4 and 5), the last
+two lanes of PEs are set to idle. Meanwhile, in the following cycle
+(Cycle 2), the systolic array stalls to perform re-quantization.
+As mentioned earlier, our quantization and computation is per-
+formed tile by tile. When accumulating partial sums across tiles,
+inverse quantization is required. To support this, an inverse quanti-
+zation unit and an accumulation unit are placed after the PE array.
+The former is implemented as a vector–scalar multiplication unit,
+while the latter is implemented as a vector–vector addition unit.
+Design of QPU. We integrate a QPU to support our quantization
+algorithm as illustrated in Fig. 5. The microarchitecture is shown
+in Fig. 12, consisting of a 5-stage pipeline.
+Stage 1: Maximum Value Extraction. This stage accepts a 64×16-
+bit floating-point vector and computes the maximum absolute value.
+The implementation drops the sign bit and compares the remaining
+part using a comparator tree.
+Stage 2: Quantization Parameter Determination. The output value
+from Stage 1 is used to determine quantization parameters, which
+7
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Chi Zhang, Jieru Zhao, Yu Feng, Chen Zhang, Quan Chen, and Minyi Guo
+16bit
+16bit
+16bit
+>
+>
+>
+>
+16bit
+abs_max (16bit)
+>
+>
+>
+abs
+abs
+abs
+abs
+<<
+16bit
+clip
+<<
+clip
+<<
+clip
+<<
+clip
+One-Hot Decoder 
+16bit
+16bit
+16bit
+<
+Thr 0
+<
+Thr 1
+<
+Thr 2
+<
+Thr 3
+PCeil
+FPoT
+Delay Input
+Meta
+Meta
+Sorting Network
+Encoder
+Decomposer
+64 x 8bit
+N x (64 x 2bit)
+Stage 5 :
+Encoding
+Stage 3 : Quantizing &
+Decomposing
+Stage 4 : Sub-Channel
+Reordering
+Stage 2 :  Quantization
+Parameter Determination
+Stage 1 : Maximum Value
+Extraction
+x64
+x64
+Figure 12: Design of QPU.
+in our algorithm include the FPoT and the corresponding precision
+ceiling. This is implemented by a bin operation, which classifies
+each value into a specific range. As described in Sec. 3.1, the quanti-
+zation parameter directly depends on the range into which the value
+falls. To determine this, values from Stage 1 are compared in paral-
+lel against predefined range boundaries, denoted as Thr0, Thr1, . . ..
+The result is encoded as a one-hot vector, which is then decoded to
+select the correct quantization parameter.
+Stage 3 and Stage 4: Quantization, Decomposition, and Sub-Channel
+Reordering. These two stages operate in parallel. Once the quantiza-
+tion parameters are determined, Stage 3 quantizes the floating-point
+inputs into 8-bit values using shifters and clippers. The quantized
+outputs are then passed to a decomposer, implemented with sim-
+ple combinational wiring, which reorganizes the 64×8-bit data into
+2-bit slices (1, 2, 3, or 4 slices for 2-, 4-, 6-, and 8-bit precision, respec-
+tively). Meanwhile, Stage 4 sorts the associated meta-information
+by FPoT using a bitonic sorting network [5].
+Stage 5: Encoding. The encoder accepts the sorted meta-information
+from Stage 4, computes the number of shifts, and packs them with
+corresponding indices. The resulting encoded data are then com-
+bined with the decomposed slices and written consecutively to
+SRAM or external memory.
+Design of VPU. We integrate a VPU to support three types
+of vector operations. The element-wise unit performs vectorized
+exponential and GELU operations using 64 parallel nonlinear units,
+implemented with piecewise cubic polynomials and lookup tables.
+The reduction unit adopts a tree structure to accumulate all elements
+within a vector. The vector-scalar product unit multiplies a single
+scalar with all elements of a vector. All these units are organized
+into a configurable pipeline, enabling flexible operation support for
+functions such as GELU and Softmax.
+4.3
+Operator Mapping
+To bridge the gap between the operators in DiT models and the
+micro-operations of our architecture, we describe how the main
+operators are mapped to our architecture.
+Linear Operation. The first primary operator is the linear layer,
+essentially a matrix multiplication between an activation tensor of
+shape [𝑚,𝑘] and a weight tensor of shape [𝑘,𝑛]. We tile the 𝑚, 𝑛,
+and 𝑘dimensions with factors of 256, 512, and 128, respectively.
+These factors are chosen based on the on-chip memory configura-
+tion and computation capacity, and they align well with the tensor
+shapes commonly found in DiTs. In each iteration, activation and
+Q1
+Q3
+K1
+Load QK
+Q@
+softmax
+S@V
+Q2
+Memory
+PE Array
+VPU
+QPU
+Quant
+Load SV
+S@V
+Memory
+PE Array
+VPU
+QPU
+Load V
+Load SV
+S@V
+Load QK
+Q@
+softmax
+S@V
+Quant
+Load V
+latency reduction by skipping
+computing attention score
+Q1
+K2 K3
+@
+K2 K3 K4 K5
+MPC1
+S1
+V2 V3
+@
+Q3
+K1 K5
+@
+MPC2
+S2
+V1 V5
+@
+(a)
+(b)
+Attention Mask 
+Block-Wise
+Pruned Block
+Load QK
+Q@
+softmax
+Quant
+Load V
+S@V
+Load SV
+S@V
+Figure 13: Illustration of (a) the execution of sparse attention
+operation and (b) the corresponding pipeline schedule. 𝑄𝑖, 𝐾𝑖
+and 𝑉𝑖represent query, key, and value vectors, 𝑆𝑖represents
+the softmax result.
+weight blocks of sizes 256 × 128 and 512 × 128 are loaded into the
+scratchpad memory, then further partitioned into tiles with a size
+of 64 × 128 and distributed across cores for MMA. Moreover, for
+differential activations, the reverse differential operation is fused by
+preloading cached activations into SRAM and adding them to the
+partial sum derived from the first tile of the matrix multiplication.
+The GELU activation is also fused with the support of VPU.
+Attention Operation. For the attention operator with SAR,
+DSTAR employs a static scheduling strategy guided by the attention
+mask. The key idea is to prune unused𝑄and 𝐾blocks and distribute
+the remaining blocks across all MPCs. As shown in Fig. 13 (a), in
+this block-wise attention mask, blocks 𝑄2 and 𝐾4 are never accessed
+and can therefore be eliminated. The remaining blocks that share
+the same 𝑄block are assigned to the same MPC.
+Within each MPC, we adopt a dataflow similar to FlashAtten-
+tion [10]. As illustrated in the top part of Fig. 13 (b), the computation
+of attention proceeds as follows: load a 𝑄𝐾tile, perform matrix
+multiplication, apply softmax and quantization, then load the 𝑉
+tile, followed by another MMA Note that all MMA operations in
+attention are performed under INT8 precision. We perform quanti-
+zation on activations using FMDQ, but with INT8 precision; these
+8-bit values are then decomposed into bit slices as discussed in
+Section 3.1. Because the PE array, VPU, and QPU are designed as
+separate units, the result of 𝑄𝐾𝑇must be transferred to VPU for
+softmax computation and to QPU for quantization, which intro-
+duces idle time in the PE array. To reduce this overhead, multiple
+𝑄and 𝐾blocks are scheduled into the PE array during these idle
+periods, as shown in the blocks with different colors in Fig. 13 (b).
+During the reuse phase in SAR, since attention scores are reused,
+neither 𝑄𝐾𝑇computation nor softmax is required. The scheduling
+switches to the pipeline illustrated in the bottom part of Fig. 13 (b).
+5
+Evaluation
+5.1
+Experimental Setup
+Algorithm and Workloads. To evaluate the algorithmic perfor-
+mance of DSTAR, we implement it on an NVIDIA A100 GPU [9].
+8
+
+DSTAR: Accelerating Diffusion Transformers via Spatial and Temporal Redundancy Reduction
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Table 2: Evaluation of model performance.
+Model
+DiT-XL
+PixArt-Sigma
+SD3.5-Medium
+SD3.5-Large
+Flux.1-Dev
+Flux.1-Schnell
+Latte
+Parameter Size
+0.675B
+0.6B
+2.5B
+8.1B
+12B
+12B
+0.675B
+Task
+Class to Image
+Text to Image
+Text to Image
+Text to Image
+Text to Image
+Text to Image
+Text to Video
+Iterations
+50
+28
+28
+28
+28
+4
+50
+Dataset
+COCO
+COCO
+COCO
+COCO
+COCO
+COCO
+FETV
+Parameter for Algorithm Evaluation
+SAR
+Thr=2e-3, Interval=2
+Thr=1e-4, Interval=2
+Thre=1e-4, Interval=2
+Thr=1e-4, Interval=2
+Thr=1e-4, Interval=2
+Thr=1e-4, Interval=2
+Thr=1e-4
+Interval=2
+FMDQ
+ScaleBase=64/256
+ScaleBase=64/256
+ScaleBase=64/256
+ScaleBase=64/256
+ScaleBase=64/256
+ScaleBase=64
+ScaleBase=
+64/256
+Model Performance
+FID ↓
+IS ↑
+FID ↓
+IS ↑
+CS ↑
+FID ↓
+IS ↑
+CS ↑
+FID ↓
+IS ↑
+CS ↑
+FID ↓
+IS ↑
+CS ↑
+FID ↓
+IS ↑
+CS ↑
+IS ↑
+Vanilla
+202.46
+41.11
+103.99
+13.72
+0.313
+94.10
+14.70
+0.323
+88.40
+14.81
+0.319
+98.24
+14.27
+0.311
+96.40
+14.37
+0.317
+26.18
+DITTO
+200.33
+38.19
+100.84
+13.23
+0.314
+89.88
+13.60
+0.326
+86.76
+14.46
+0.323
+99.33
+13.39
+0.313
+96.92
+13.65
+0.317
+17.96
+Exion
+200.16
+35.35
+107.90
+10.29
+0.309
+105.74
+11.06
+0.316
+124.93
+10.66
+0.315
+95.11
+12.64
+0.312
+90.88
+13.89
+0.319
+18.26
+DS-SAR
+196.39
+41.77
+103.93
+13.48
+0.312
+93.30
+14.20
+0.322
+90.62
+13.82
+0.319
+100.91
+13.89
+0.312
+98.37
+14.70
+0.320
+26.53
+DS-FMDQ
+204.89
+42.73
+101.78
+13.36
+0.316
+91.16
+14.64
+0.324
+86.70
+15.12
+0.321
+97.74
+14.44
+0.311
+96.48
+14.36
+0.317
+26.54
+DS-FMDQ-DYN
+204.55
+42.89
+101.31
+13.72
+0.316
+90.64
+14.53
+0.324
+87.58
+15.26
+0.321
+99.63
+13.89
+0.312
+97.17
+14.37
+0.316
+26.35
+DS-All
+198.64
+41.96
+100.61
+13.63
+0.316
+90.15
+14.16
+0.324
+88.43
+14.20
+0.321
+99.73
+13.85
+0.313
+98.38
+14.73
+0.319
+26.79
+FID: Fréchet Inception Distance; IS: Inception Score; CLIP: CLIP Score measuring image-text alignment.
+We select seven DiT-based models covering class-guided and text-
+guided image generation, as well as text-guided video generation.
+Specifically, DiT-XL-512 [39] is used for class-guided image gener-
+ation, and Latte [36] is used for text-to-video generation. For the
+text-to-image task, we select models from the three most popular
+model families, namely PixArt [7], Stable Diffusion [46], and Flux
+[23]. We evaluate model performance on the COCO dataset [29]
+and the FETV dataset [30] for image generation and video gener-
+ation, respectively, using 1K samples. We report Inception Score
+(IS), Fréchet Inception Distance (FID), and CLIP Score (CS) for each
+model using open-source evaluation tools [17, 38].
+Architecture. To evaluate the latency of DSTAR, we develop
+a discrete event simulator based on SimPy [49], integrated with
+Ramulator [34] to assess the performance of our accelerator using
+memory access traces collected through workload profiling. For
+the hardware configuration, we adopt a setup comparable to the
+NVIDIA A100 GPU. Specifically, we adopt 32 MPCs that provide
+a total of 262 A8W8 TOPS of computational capacity. This is ap-
+proximately equivalent to 312 TOPS, which is the theoretical FP16
+TOPS of the NVIDIA A100 GPU [9]. We incorporate HBM2 with 16
+channels, offering a bandwidth of approximately 1500 GB/s.
+To evaluate the power and area of our architecture, we first
+implement the main component of DSTAR in SystemVerilog and
+synthesize it using Synopsys Design Compiler under the FreePDK
+45nm [51] technology node at a 1 GHz clock frequency. Further-
+more, we estimate the power and area of the on-chip SRAM using
+CACTI [4], which is widely used for estimating on-chip SRAM,
+such as caches. DRAM power consumption is estimated based on
+supplier-provided power data. We combine all these power data into
+our simulator, estimating power consumption over the workloads
+as mentioned earlier. Additionally, to compare energy efficiency
+between our design, GPU, and state-of-the-art (SOTA) accelera-
+tors, we use DeepScaleTool [48] to scale the power data of all the
+accelerators to the same technology node of A100 GPU.
+Baselines. Our GPU baseline is evaluated on an NVIDIA A100
+GPU [9]. We use APIs from Diffusers [54] for all models. We insert
+torch.cuda.synchronize() to record the execution time and use
+the NVIDIA Nsight tool for power estimation.
+We compare DSTAR against four accelerator baselines: S-DMA [62],
+Cambricon-D [21], DITTO [19], and EXION [16]. To enable a fair
+comparison, we implement the token merging mechanism used in
+S-DMA, the outlier-aware schemes adopted in Cambricon-D and
+DITTO, as well as the FFN-reuse algorithm and Top-𝐾attention
+pruning used in EXION on a GPU to extract execution traces. The
+simulator reproduces the execution behavior of each accelerator
+according to the collected traces. In addition, we include an INT8
+systolic array architecture [56], referred to as INT8-SA. We enhance
+INT8-SA with group quantization, following the approach used
+in [8], by modifying the PEs to support requantization. All models
+are configured to meet a common accuracy standard: less than 5%
+degradation in FID/FVD and less than a 1-point drop in IS. The
+hardware configurations of all three baselines are scaled to match
+the TOPS of the DSTAR configuration.
+5.2
+Algorithm Evaluation
+Both algorithmic optimizations, namely FMDQ and SAR, introduce
+approximation while reducing computational burden. Therefore, we
+evaluate their effectiveness in reducing bit-width and computation
+count, and assess their impact on model accuracy.
+Model accuracy. Table 2 shows the impact of our optimiza-
+tion on model performance. We use the 16-bit floating-point model
+(Vanilla) as the baseline. DSTAR is abbreviated as DS. Starting from
+Vanilla, we progressively apply FMDQ to quantize the differentials
+between FFN activations in adjacent timesteps and apply SAR to op-
+timize attention operations. To evaluate the impact of using a static
+base in FMDQ, we further introduce a reference variant, denoted
+as DS-FMDQ-DYN, which adopts a dynamic base for quantization.
+The parameter settings of SAR and FMDQ are summarized in the
+table. For SAR, 𝑇ℎ𝑟denotes the percentage of attention scores to
+be pruned, and 𝐼𝑛𝑡𝑒𝑟𝑣𝑎𝑙specifies the number of timesteps between
+recomputation of the attention scores. For FMDQ, 𝑆𝑐𝑎𝑙𝑒𝐵𝑎𝑠𝑒repre-
+sents the minimum quantization scale allowed for each group. In
+9
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Chi Zhang, Jieru Zhao, Yu Feng, Chen Zhang, Quan Chen, and Minyi Guo
+5 6 %
+5 6 %
+4 9 %
+5 0 %
+4 1 %
+4 1 %
+4 0 %
+2 5 %
+5 9 %
+4 7 %
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 2 5 6
+F l u x . 1 - D e v - 5 1 2
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+L a t t e
+G
+e o . M
+e a n
+0
+1
+2
+3
+4
+5
+6
+7
+8
+A v g . B i t
+W
+o r k l o a d
+ I N T 8 
+ D I T T O 
+ D S T A R
+Figure 14: Comparison of average bit-width.
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 2 5 6
+F l u x . 1 - D e v - 5 1 2
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+L a t t e
+0 . 0 E + 0
+9 . 0 E + 3
+1 . 8 E + 4
+2 . 7 E + 4
+3 . 6 E + 4
+4 . 5 E + 4
+C o m
+p u t a t i o n ( F l o p s )
+W
+o r k l o a d
+ O r i g i n a l 
+ E X I O N 
+ D S T A R
+Figure 15: Comparison of computation reduction.
+certain models, we assign larger 𝑆𝑐𝑎𝑙𝑒𝐵𝑎𝑠𝑒values to the first few
+layers, as they are more sensitive to quantization error.
+Our optimizations result in negligible performance degradation
+for most models and, in some cases, even outperform the vanilla
+model. Although certain models, such as PixArt-Sigma, exhibit rel-
+atively larger accuracy drops, the degradation remains within a
+reasonable range (less than 5%), as also reported in [31]. Further-
+more, Figure 19 presents representative generated images from
+all evaluated models. The visual results show that our optimized
+approach consistently preserves visual fidelity and is capable of
+generating high-quality images across all models.
+Sensitivity Analysis. Both SAR and FMDQ rely on static pro-
+filing. To evaluate their generalization capability, we conduct a
+sensitivity study. Specifically, profiling is performed on a training
+set, while the proposed methods are evaluated on a separate test
+set using multiple random seeds. Figure 18 presents the resulting
+PSNR values. The results show that different models exhibit vary-
+ing levels of sensitivity to static profiling. Models such as PixArt-
+Sigma-1K demonstrate limited sensitivity, achieving relatively high
+PSNR values with low variance across seeds. In contrast, models
+such as SD3.5-Large achieve lower PSNR values, indicating larger
+pixel-level deviations. Nevertheless, the qualitative results shown
+in Figure 19 indicate that these models still maintain strong visual
+fidelity and semantic alignment with the input prompts
+Average Bit-width. Figure 14 presents the average bit-width
+achieved by FMDQ, compared with the quantization scheme adopted
+in the state-of-the-art accelerator DITTO [19]. Leveraging fine-
+grained group selection and mixed precision, FMDQ quantizes
+differential activations to an average of 4.3 bits. For models with
+high temporal redundancy, such as Latte, FMDQ further reduces
+the average bit-width to 3.2 bits—only 41% of the INT8 baseline. In
+contrast, DITTO achieves an average bit-width of 5.4 bits. These
+results highlight FMDQ’s strong capability in exploiting temporal
+redundancy to reduce quantization precision.
+Computation reduction of attention layer. Figure 15 presents
+the computation reduction of the attention layer when applying
+Top-K attention pruning from EXION [16] and the proposed SAR
+method in DSTAR. SAR achieves up to a 50% reduction in attention-
+layer computation, whereas EXION yields at most 32%. Moreover,
+in attention-light models such as Flux.1-dev-256, EXION prunes
+almost no attention scores. This is because SAR’s block-wise prun-
+ing pattern is better aligned with the inherent attention structure
+in DiT, and its reuse mechanism further reduces computation by
+skipping redundant operations within the attention layer. Overall,
+these results highlight the superior effectiveness of SAR in reducing
+attention-layer computation.
+5.3
+Architecture Evaluation
+Latency Speedup. We first compare DSTAR’s latency speedup
+against GPU implementations. We use the implementation in dif-
+fusers [54] library as GPU baseline and additionally implement
+an SAR kernel using Triton [37], denoted as GPU and GPU-SAR,
+respectively. As shown in Fig. 17, DSTAR achieves speedups over
+the GPU baseline ranging from ×3.54 to ×7.33, demonstrating the
+latency advantage of algorithm–architecture co-design. Specifi-
+cally, GPU-SAR achieves an average ×1.46 speedup over the naive
+GPU implementation, while DSTAR-SAR achieves an average ×3.67
+speedup, highlighting the benefits of the specialized architecture.
+We further compare DSTAR with five accelerator baselines de-
+scribed in Section 5.1, namely INT8-SA, S-DMA, Cambricon-D,
+DITTO, and EXION. As shown in Fig. 16, DSTAR achieves an
+average ×1.63 speedup over S-DMA. Originally designed for U-
+Net–based diffusion models, S-DMA incorporates a local token-
+merging strategy. However, when applied to DiT, this strategy
+introduces large errors because DiT lacks the strong spatial locality
+found in CNN-based models. Consequently, S-DMA provides only
+limited performance improvement when transferred to DiT.
+Moreover, DSTAR outperforms the state-of-the-art accelerators,
+Cambricon-D and DITTO, by an average speedup of 1.90× and
+1.66×, respectively. Cambricon-D is designed primarily for UNet-
+based models, and its architecture suffers from PE imbalance. Opti-
+mization in DITTO primarily targets linear layers, leading to lim-
+ited computation reduction in attention. Furthermore, DSTAR with
+only FMDQ achieves 1.50× and 1.32× speedup over Cambricon-D
+and DITTO, respectively. Both Cambricon-D and DITTO incor-
+porate coarse-grained quantization mechanisms. As discussed in
+Section 2.2, this introduces great quantization error on large-scale
+DiTs, making them miss the opportunity to quantize a large por-
+tion of values to low bits, even though many are well-suited for
+lower-precision representation. In contrast, FMDQ employs a finer-
+grained quantization strategy by dividing the tensor into multiple
+tiles along the token dimension and applying channel-wise mixed-
+precision quantization within each tile. This approach increases
+the proportion of values quantized to low bits, thereby enhancing
+computational efficiency without compromising accuracy.
+Although EXION explores optimization opportunities in both
+the linear and attention layers, DSTAR still achieves an average
+1.48× speedup over it, owing to the combined benefits of FMDQ
+and SAR, as discussed in Section 5.2. FMDQ of DSTAR offers a
+better accuracy-performance trade-off than EXION which achieves
+10
+
+DSTAR: Accelerating Diffusion Transformers via Spatial and Temporal Redundancy Reduction
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+x 1 . 8
+x 2 . 5
+x 1 . 6
+x 1 . 7
+x 1 . 4
+x 1 . 6
+x 1 . 7
+x 1 . 5
+x 1 . 7
+x 1 . 7
+x 2 . 4
+x 3 . 7
+x 2 . 3
+x 2 . 5
+x 2 . 8
+x 2 . 2
+x 2 . 4
+x 2 . 1
+x 1 . 7
+x 2 . 4
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 2 5 6
+F l u x . 1 - D e v - 5 1 2
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+L a t t e
+G e o . M
+e a n
+0 . 0
+0 . 5
+1 . 0
+1 . 5
+2 . 0
+2 . 5
+S p e e d u p
+W
+o r k l o a d
+ I N T 8 - S A 
+ S - D M
+A 
+ C a m
+b r i c o n - D 
+ D I T T O 
+ E X I O N 
+ D S T A R - S P 
+ D S T A R - S A R 
+ D S T A R - D i f f Q 
+ D S T A R - A L L
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 2 5 6
+F l u x . 1 - D e v - 5 1 2
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+L a t t e
+G e o . M
+e a n
+0 . 0
+0 . 5
+1 . 0
+1 . 5
+2 . 0
+2 . 5
+3 . 0
+3 . 5
+4 . 0
+R e l a t i v e E n e r g y E f f i c i e n c y
+W
+o r k l o a d
+ I N T 8 - S A 
+ S - D M
+A 
+ C a m
+b r i c o n - D 
+ D I T T O 
+ E X I O N 
+ D S T A R - S P 
+ D S T A R - S A R 
+ D S T A R - D i f f Q 
+ D S T A R - A L L
+Figure 16: Evaluation of latency speedup and energy efficiency compared with other accelerators. DSTAR-SP, DSTAR-SAR
+and DSTAR-FMDQ refer to DSTAR equipped with sparse attention, sparse attention reuse, and quantization, respectively.
+DSTAR-ALL enables all optimizations.
+x 4 . 6 7
+x 7 . 3 3
+x 5 . 3 8
+x 5 . 6 0
+x 4 . 1 0
+x 3 . 5 4
+x 4 . 4 9
+x 3 . 8 3
+x 4 . 9 1
+x 4 . 7 6
+x 2 4 . 5 9
+x 4 1 . 8 9
+x 3 0 . 3 7
+x 3 0 . 9 7
+x 3 1 . 2 5
+x 1 8 . 8 9
+x 2 4 . 4 6
+x 2 1 . 3 3
+x 2 6 . 1 3
+x 2 7 . 0 7
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 2 5 6
+F l u x . 1 - D e v - 5 1 2
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+L a t t e
+G e o . M
+e a n
+0
+1
+2
+3
+4
+5
+6
+7
+8
+S p e e d u p
+W
+o r k l o a d
+ G P U 
+ G P U - S A R 
+ D S T A R - S P 
+ D S T A R - S A R 
+ D S T A R - D i f f Q 
+ D S T A R - A L L
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 2 5 6
+F l u x . 1 - D e v - 5 1 2
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+L a t t e
+G e o . M
+e a n
+0
+1 0
+2 0
+3 0
+4 0
+5 0
+R e l a t i v e E n e r g y E f f i c i e n c y
+W
+o r k l o a d
+ G P U 
+ G P U - S A R 
+ D S T A R - S P 
+ D S T A R - S A R 
+ D S T A R - D i f f Q 
+ D S T A R - A L L
+Figure 17: Evaluation of latency speedup and energy efficiency compared with GPU. DSTAR-SP, DSTAR-SAR, DSTAR-FMDQ
+and DSTAR-ALL are the same as Fig. 16.
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+1 0
+1 2
+1 4
+1 6
+1 8
+2 0
+2 2
+2 4
+P S N R ( d B )
+ 2 5 %
+~ 7 5 %
+ 1 . 5 I n t e r q u a r t i l e R a n g e 
+ M
+e d i a n L i n e
+ M
+e a n
+ O u t l i e r s
+Figure 18: Evaluation of accuracy sensitivity.
+larger average bit-width under the same accuracy. Moreover, SAR
+of DSTAR utilizes a pattern better aligned with DiT, and exploits
+reuse opportunities inherent in DiT, pruning more computations
+compared to EXION while introducing minimal overhead.
+Energy Efficiency. We also compare the energy efficiency of
+DSTAR with other hardware designs. As shown in Fig. 17, DSTAR
+achieves 18.89× to 41.89× higher energy efficiency compared to
+the A100 GPU. This improvement results from both the reduction
+in FLOPs and the power efficiency advantages. Fig. 16 depicts the
+energy efficiency comparison between DSTAR and prior acceler-
+ator designs. DSTAR achieves an average of 2.43× higher energy
+efficiency than INT8-SA. When comparing with state-of-the-art de-
+signs, DSTAR delivers an average of 4.45× higher energy efficiency
+than EXION, owing to its use of low-precision computation and su-
+perior algorithmic optimizations. Moreover, DSTAR achieves 2.87×,
+2.27x and 2.21× higher average energy efficiency than DITTO, S-
+DMA and Cambricon-D, respectively. This improvement primarily
+stems from the reduced execution time, which significantly lowers
+the dynamic energy consumption of the PE array, as well as the
+reduced number of external memory accesses.
+Overhead and PE utilization. Our algorithm introduces addi-
+tional overhead as well as potential execution imbalance. Thus, we
+evaluate the impact of these factors. We first analyze the overhead
+introduced by FMDQ. As shown in Fig. 20, we present the execution
+cycle breakdown of the three pipeline stages in FMDQ-based matrix
+multiplication. Diff denotes the differential quantization stage, MM
+denotes the matrix multiplication stage, and Rdiff denotes the re-
+verse differential stage. We observe that, across all evaluated models,
+MM remains the pipeline bottleneck, indicating that the pipelined
+execution effectively hides most of the additional overhead.
+11
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Chi Zhang, Jieru Zhao, Yu Feng, Chen Zhang, Quan Chen, and Minyi Guo
+Figure 19: Visual results generated by the evaluated models.
+2 1 %
+2 5 %
+1 8 %
+1 2 %
+5 %
+7 %
+9 %
+7 %
+2 5 %
+5 9 %
+6 9 %
+7 6 %
+8 3 %
+5 0 %
+6 6 %
+8 1 %
+8 4 %
+7 4 %
+2 0 %
+6 %
+6 %
+6 %
+4 5 %
+2 7 %
+1 0 %
+9 %
+1 %
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 2 5 6
+F l u x . 1 - D e v - 5 1 2
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+L a t t e
+0
+2 0
+4 0
+6 0
+8 0
+1 0 0
+C y c l e s P e r c e n t a g e %
+W
+o r k l o a d
+ R d i f f
+ M M
+ D i f f
+Figure 20: Breakdown of overhead in FMDQ.
+6 0 %
+6 0 %
+6 9 %
+8 7 %
+6 5 %
+6 4 %
+6 5 %
+6 9 %
+6 6 %
+8 8 %
+8 9 %
+9 4 %
+1 0 0 %
+9 2 %
+9 2 %
+9 3 %
+9 8 %
+9 3 %
+5 2 %
+9 7 %
+7 7 %
+8 5 %
+3 6 %
+9 2 %
+9 3 %
+9 2 %
+7 5 %
+D i T - X L - 5 1 2
+P i x a r t - S i g m
+a - 1 k
+S D 3 . 5 - M
+e d i u m
+S D 3 . 5 - L a r g e
+F l u x . 1 - D e v - 2 5 6
+F l u x . 1 - D e v - 5 1 2
+F l u x . 1 - D e v - 1 k
+F l u x . 1 - S c h n e l l
+L a t t e
+0 E + 0
+1 E + 5
+2 E + 5
+3 E + 5
+4 E + 5
+5 E + 5
+6 E + 5
+T h e o r e t i c a l m
+a x i m
+u m
+T h r o u g h p u t ( G O p s )
+W
+o r k l o a d
+ F F N
+ F F N - R e o r d e r
+ A t t e n t i o n
+Figure 21: Throughput and PE utilization.
+To evaluate the imbalance and potential PE underutilization
+introduced by FMDQ and SAR, we further measure the throughput
+of FFN and attention. The results are shown in Fig. 21. For the
+naive FFN implementation, the shift operations required by mixed-
+precision computation and scaling reduce average PE utilization to
+67%. By applying the proposed reorder optimization, this overhead
+is largely eliminated, enabling all evaluated models to achieve over
+88% of the theoretical peak PE utilization.
+For attention, most models achieve over 75% PE utilization, ex-
+cept for light-attention models such as DiT-XL-512 and Flux.1-dev-
+256. Their lower utilization is mainly caused by shorter sequence
+lengths in attention and the imbalance of loading key/value tensors
+in sparse attention.
+Table 3: Area and power consumption breakdown.
+Component
+Parameter
+Area (𝑚𝑚2)
+Power (W)
+MPC
+MPU
+64×64 PE array
+3.67
+3.4307
+VPU
+SIMD64
+0.05
+0.0502
+QPU
+SIMD64
+0.10
+0.0966
+Unified Buffer
+80 KB, 10 Banks
+1.51
+0.1320
+Global Scratchpad
+512 KB, 32 Banks
+6.49
+0.0457
+Total
+32 MPCs
+176.75
+118.75
+Area and Power Consumption. Table 3 presents the area
+and power breakdown of the DSTAR hardware architecture im-
+plemented in 45nm technology node. With the configuration of
+32 MPCs and a 512KB global scratchpad, the DSTAR hardware
+accelerator occupies a total area of 176.75mm2 and consumes the
+power of around 118.75W. These values are significantly smaller
+than the 826mm2 die size and 250W thermal design power (TDP)
+of the Nvidia A100 GPU [1], which is fabricated in 7nm technology
+node. Among all components, the PE array occupies the majority
+of the area and power consumption, consuming 68.37% of area and
+92.48% of power consumption, respectively. Regarding the QPU,
+it accounts for only 1.8% of the area and 2.6% of the power con-
+sumption of a single MPC, indicating its negligible overhead when
+processing our quantization algorithm.
+5.4
+Ablation Study of Timestep
+To evaluate the effectiveness of DSTAR under different diffusion
+sampling schedules, we conduct a timestep ablation study on PixArt-
+Sigma The number of denoising timesteps ranges from 10 to 50.
+Figure 22 reports the image quality (PSNR), overall speedup over
+the GPU baseline, SAR sparsity ratio, and the average quantization
+bitwidth of FMDQ under different timestep settings.
+The results show that DSTAR maintains stable accuracy across
+a wide range of timesteps. The PSNR varies only from 14.53 dB
+to 18.24 dB, demonstrating the robustness of our approach under
+12
+
+DSTAR: Accelerating Diffusion Transformers via Spatial and Temporal Redundancy Reduction
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+1 0
+2 0
+3 0
+4 0
+5 0
+0
+4
+8
+1 2
+1 6
+2 0
+P S N R ( d B )
+# T i m
+e s t e p s
+1 0
+2 0
+3 0
+4 0
+5 0
+0 . 0
+0 . 5
+1 . 0
+1 . 5
+2 . 0
+2 . 5
+3 . 0
+S p e e d u p
+# T i m
+e s t e p s
+1 0
+2 0
+3 0
+4 0
+5 0
+0 . 0
+0 . 1
+0 . 2
+0 . 3
+0 . 4
+0 . 5
+S p a r s i t y
+# T i m
+e s t e p s
+1 0
+2 0
+3 0
+4 0
+5 0
+0
+1
+2
+3
+4
+A v g . B i t
+# T i m
+e s t e p s
+Figure 22: Ablation study across different timestep settings.
+different sampling schedules. Similarly, the speedup remains sta-
+ble, ranging from 2.45× to 2.76×, indicating that DSTAR delivers
+performance benefits regardless of the number of denoising steps.
+Interestingly, the speedup slightly increases as the number of
+timesteps grows. To better understand this trend, we further an-
+alyze the SAR sparsity ratio and the average bitwidth of FMDQ.
+As shown in Figure 22, the sparsity ratio of SAR remains nearly
+constant across different timestep settings. This is expected because
+the semantic sparsity exploited by SAR is largely independent of the
+total number of denoising steps. In contrast, the average bitwidth
+of FMDQ decreases as the number of timesteps increases. As dis-
+cussed previously, a larger number of denoising steps leads to higher
+similarity between activations from adjacent timesteps, resulting
+in smaller activation differences and therefore lower differential
+quantization precision requirements.
+6
+Conclusion
+In this work, we introduce DSTAR, a software-hardware co-design
+framework for DiT inference acceleration by effectively exploiting
+both spatial and temporal redundancies. Algorithmic and hardware
+optimizations are proposed to improve the DiT inference efficiency
+while maintaining high generation quality of models.
+Acknowledgments
+This work was supported by the National Natural Science Founda-
+tion of China under Grant 62472273 and Grant 62232015.
+References
+[1] [n. d.]. NVIDIA A100 PCIe 40 GB Specs — techpowerup.com. https://www.
+techpowerup.com/gpu-specs/a100-pcie-40-gb.c3623. [Accessed 09-04-2025].
+[2] Shubham Agarwal, Subrata Mitra, Sarthak Chakraborty, Srikrishna Karanam,
+Koyel Mukherjee, and Shiv Kumar Saini. 2024. Approximate Caching for Ef-
+ficiently Serving Text-to-Image Diffusion Models. In 21st USENIX Symposium
+on Networked Systems Design and Implementation (NSDI 24). USENIX Associa-
+tion, Santa Clara, CA, 1173–1189. https://www.usenix.org/conference/nsdi24/
+presentation/agarwal-shubham
+[3] Zhenyu Bai, Pranav Dangi, Huize Li, and Tulika Mitra. 2024. SWAT: Scalable
+and Efficient Window Attention-based Transformers Acceleration on FPGAs. In
+Proceedings of the 61st ACM/IEEE Design Automation Conference (San Francisco,
+CA, USA) (DAC ’24). Association for Computing Machinery, New York, NY, USA,
+Article 93, 6 pages. https://doi.org/10.1145/3649329.3658488
+[4] Rajeev Balasubramonian, Andrew B. Kahng, Naveen Muralimanohar, Ali Shafiee,
+and Vaishnav Srinivas. 2017. CACTI 7: New Tools for Interconnect Exploration
+in Innovative Off-Chip Memories. ACM Trans. Archit. Code Optim. 14, 2, Article
+14 (June 2017), 25 pages. https://doi.org/10.1145/3085572
+[5] Gianfranco Bilardi and Franco P. Preparata. 1984. An Architecture for Bitonic
+Sorting with Optimal VLSI Performnance. IEEE Trans. Comput. C-33, 7 (1984),
+646–651. https://doi.org/10.1109/TC.1984.5009338
+[6] Andreas Blattmann, Tim Dockhorn, Sumith Kulal, Daniel Mendelevitch, Maciej
+Kilian, Dominik Lorenz, Yam Levi, Zion English, Vikram Voleti, Adam Letts,
+Varun Jampani, and Robin Rombach. 2023.
+Stable Video Diffusion: Scaling
+Latent Video Diffusion Models to Large Datasets.
+arXiv:2311.15127 [cs.CV]
+https://arxiv.org/abs/2311.15127
+[7] Junsong Chen, Jincheng Yu, Chongjian Ge, Lewei Yao, Enze Xie, Yue Wu, Zhong-
+dao Wang, James Kwok, Ping Luo, Huchuan Lu, and Zhenguo Li. 2023. PixArt-𝛼:
+Fast Training of Diffusion Transformer for Photorealistic Text-to-Image Synthesis.
+arXiv:2310.00426 [cs.CV] https://arxiv.org/abs/2310.00426
+[8] Lei Chen, Yuan Meng, Chen Tang, Xinzhu Ma, Jingyan Jiang, Xin Wang, Zhi
+Wang, and Wenwu Zhu. 2025. Q-DiT: Accurate Post-Training Quantization
+for Diffusion Transformers. In Proceedings of the Computer Vision and Pattern
+Recognition Conference (CVPR). 28306–28315.
+[9] Jack Choquette and Wish Gandhi. 2020. NVIDIA A100 GPU: Performance &
+Innovation for GPU Computing. In 2020 IEEE Hot Chips 32 Symposium (HCS).
+1–43. https://doi.org/10.1109/HCS49909.2020.9220622
+[10] Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAt-
+tention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In
+Advances in Neural Information Processing Systems, S. Koyejo, S. Mohamed,
+A. Agarwal, D. Belgrave, K. Cho, and A. Oh (Eds.), Vol. 35. Curran Associates,
+Inc., 16344–16359. https://proceedings.neurips.cc/paper_files/paper/2022/file/
+67d57c32e20fd0a7a302cb81d36e40d5-Paper-Conference.pdf
+[11] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. 2022.
+GPT3.int8(): 8-bit Matrix Multiplication for Transformers at Scale. In Ad-
+vances in Neural Information Processing Systems, S. Koyejo, S. Mohamed,
+A. Agarwal, D. Belgrave, K. Cho, and A. Oh (Eds.), Vol. 35. Curran Associates,
+Inc., 30318–30332. https://proceedings.neurips.cc/paper_files/paper/2022/file/
+c3ba4962c05c49636d4c6206a97e9c8a-Paper-Conference.pdf
+[12] Sicheng Gao, Xuhui Liu, Bohan Zeng, Sheng Xu, Yanjing Li, Xiaoyan Luo,
+Jianzhuang Liu, Xiantong Zhen, and Baochang Zhang. 2023. Implicit Diffu-
+sion Models for Continuous Super-Resolution. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). 10021–10030.
+[13] Cong Guo, Jiaming Tang, Weiming Hu, Jingwen Leng, Chen Zhang, Fan Yang,
+Yunxin Liu, Minyi Guo, and Yuhao Zhu. 2023. OliVe: Accelerating Large Language
+Models via Hardware-friendly Outlier-Victim Pair Quantization. In Proceedings
+of the 50th Annual International Symposium on Computer Architecture (Orlando,
+FL, USA) (ISCA ’23). Association for Computing Machinery, New York, NY, USA,
+Article 3, 15 pages. https://doi.org/10.1145/3579371.3589038
+[14] Ruiqi Guo, Lei Wang, Xiaofeng Chen, Hao Sun, Zhiheng Yue, Yubin Qin, Huiming
+Han, Yang Wang, Fengbin Tu, Shaojun Wei, Yang Hu, and Shouyi Yin. 2024. 20.2
+A 28nm 74.34TFLOPS/W BF16 Heterogenous CIM-Based Accelerator Exploiting
+Denoising-Similarity for Diffusion Models. In 2024 IEEE International Solid-State
+Circuits Conference (ISSCC), Vol. 67. 362–364. https://doi.org/10.1109/ISSCC49657.
+2024.10454308
+[15] Tae Jun Ham, Yejin Lee, Seong Hoon Seo, Soosung Kim, Hyunji Choi, Sung Jun
+Jung, and Jae W. Lee. 2021. ELSA: Hardware-Software Co-design for Efficient,
+Lightweight Self-Attention Mechanism in Neural Networks. In 2021 ACM/IEEE
+48th Annual International Symposium on Computer Architecture (ISCA). 692–705.
+https://doi.org/10.1109/ISCA52012.2021.00060
+[16] Jaehoon Heo, Adiwena Putra, Jieon Yoon, Sungwoong Yune, Hangyeol Lee, Ji-
+Hoon Kim, and Joo-Young Kim. 2025. EXION: Exploiting Inter-and Intra-Iteration
+Output Sparsity for Diffusion Models. In 2025 IEEE International Symposium on
+High Performance Computer Architecture (HPCA). 324–337. https://doi.org/10.
+1109/HPCA61900.2025.00034
+[17] Kaiyi Huang, Kaiyue Sun, Enze Xie, Zhenguo Li, and Xihui Liu. 2023. T2i-
+compbench: A comprehensive benchmark for open-world compositional text-to-
+image generation. Advances in Neural Information Processing Systems 36 (2023),
+78723–78747.
+[18] Bahjat Kawar, Shiran Zada, Oran Lang, Omer Tov, Huiwen Chang, Tali Dekel,
+Inbar Mosseri, and Michal Irani. 2023. Imagic: Text-Based Real Image Editing
+With Diffusion Models. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR). 6007–6017.
+[19] Sungbin Kim, Hyunwuk Lee, Wonho Cho, Mincheol Park, and Won Woo Ro. 2025.
+Ditto: Accelerating Diffusion Model via Temporal Value Similarity. In 2025 IEEE
+International Symposium on High Performance Computer Architecture (HPCA).
+338–352. https://doi.org/10.1109/HPCA61900.2025.00035
+[20] Sangjin Kim, Jungjun Oh, Jeonggyu So, Yuseon Choi, Sangyeob Kim, Dongseok
+Im, Gwangtae Park, and Hoi-Jun Yoo. 2026. EdgeDiff: Energy-Efficient Multi-
+Modal Few-Step Diffusion Model Accelerator Using Mixed-Precision and Re-
+ordered Group Quantization. IEEE Journal of Solid-State Circuits 61, 1 (2026),
+168–182. https://doi.org/10.1109/JSSC.2025.3611456
+[21] Weihao Kong, Yifan Hao, Qi Guo, Yongwei Zhao, Xinkai Song, Xiaqing Li, Mo
+Zou, Zidong Du, Rui Zhang, Chang Liu, Yuanbo Wen, Pengwei Jin, Xing Hu, Wei
+13
+
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+Chi Zhang, Jieru Zhao, Yu Feng, Chen Zhang, Quan Chen, and Minyi Guo
+Li, Zhiwei Xu, and Tianshi Chen. 2024. Cambricon-D: Full-Network Differential
+Acceleration for Diffusion Models. In 2024 ACM/IEEE 51st Annual International
+Symposium on Computer Architecture (ISCA). 903–914. https://doi.org/10.1109/
+ISCA59077.2024.00070
+[22] Raghuraman Krishnamoorthi. 2018. Quantizing deep convolutional networks
+for efficient inference: A whitepaper. arXiv:1806.08342 [cs.LG] https://arxiv.org/
+abs/1806.08342
+[23] Black Forest Labs. 2024. FLUX. https://github.com/black-forest-labs/flux.
+[24] Jungi Lee, Wonbeom Lee, and Jaewoong Sim. 2024. Tender: Accelerating Large
+Language Models via Tensor Decomposition and Runtime Requantization. In
+2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture
+(ISCA). 1048–1062. https://doi.org/10.1109/ISCA59077.2024.00080
+[25] Huize Li, Zhaoying Li, Zhenyu Bai, and Tulika Mitra. 2024. ASADI: Accelerating
+Sparse Attention Using Diagonal-based In-Situ Computing. In 2024 IEEE Interna-
+tional Symposium on High-Performance Computer Architecture (HPCA). 774–787.
+https://doi.org/10.1109/HPCA57654.2024.00065
+[26] Xiuyu Li, Yijiang Liu, Long Lian, Huanrui Yang, Zhen Dong, Daniel Kang, Shang-
+hang Zhang, and Kurt Keutzer. 2023. Q-Diffusion: Quantizing Diffusion Models.
+In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV).
+17535–17545.
+[27] Yuhang Li, Xin Dong, and Wei Wang. 2020.
+Additive Powers-of-Two
+Quantization: An Efficient Non-uniform Discretization for Neural Networks.
+arXiv:1909.13144 [cs.LG] https://arxiv.org/abs/1909.13144
+[28] Bin Lin, Yunyang Ge, Xinhua Cheng, Zongjian Li, Bin Zhu, Shaodong Wang,
+Xianyi He, Yang Ye, Shenghai Yuan, Liuhan Chen, Tanghui Jia, Junwu Zhang,
+Zhenyu Tang, Yatian Pang, Bin She, Cen Yan, Zhiheng Hu, Xiaoyi Dong, Lin Chen,
+Zhang Pan, Xing Zhou, Shaoling Dong, Yonghong Tian, and Li Yuan. 2024. Open-
+Sora Plan: Open-Source Large Video Generation Model. arXiv:2412.00131 [cs.CV]
+https://arxiv.org/abs/2412.00131
+[29] Tsung-Yi Lin, Michael Maire, Serge J. Belongie, Lubomir D. Bourdev, Ross B. Gir-
+shick, James Hays, Pietro Perona, Deva Ramanan, Piotr Doll’a r, and C. Lawrence
+Zitnick. 2014. Microsoft COCO: Common Objects in Context. CoRR abs/1405.0312
+(2014). arXiv:1405.0312 http://arxiv.org/abs/1405.0312
+[30] Yuanxin Liu, Lei Li, Shuhuai Ren, Rundong Gao, Shicheng Li, Sishuo Chen, Xu
+Sun, and Lu Hou. 2023. FETV: A Benchmark for Fine-Grained Evaluation of
+Open-Domain Text-to-Video Generation. arXiv preprint arXiv: 2311.01813 (2023).
+[31] Jinming Lou, Wenyang Luo, Yufan Liu, Bing Li, Xinmiao Ding, Weiming Hu,
+Jiajiong Cao, Yuming Li, and Chenguang Ma. 2024. Token Caching for Diffusion
+Transformer Acceleration. arXiv:2409.18523 [cs.LG] https://arxiv.org/abs/2409.
+18523
+[32] Cheng Lu, Yuhao Zhou, Fan Bao, Jianfei Chen, Chongxuan LI, and Jun Zhu. 2022.
+DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in
+Around 10 Steps. In Advances in Neural Information Processing Systems, S. Koyejo,
+S. Mohamed, A. Agarwal, D. Belgrave, K. Cho, and A. Oh (Eds.), Vol. 35. Curran
+Associates, Inc., 5775–5787. https://proceedings.neurips.cc/paper_files/paper/
+2022/file/260a14acce2a89dad36adc8eefe7c59e-Paper-Conference.pdf
+[33] Liqiang Lu, Yicheng Jin, Hangrui Bi, Zizhang Luo, Peng Li, Tao Wang, and Yun
+Liang. 2021. Sanger: A Co-Design Framework for Enabling Sparse Attention using
+Reconfigurable Architecture. In MICRO-54: 54th Annual IEEE/ACM International
+Symposium on Microarchitecture (Virtual Event, Greece) (MICRO ’21). Association
+for Computing Machinery, New York, NY, USA, 977–991.
+https://doi.org/10.
+1145/3466752.3480125
+[34] Haocong Luo, Yahya Can Tuğrul, F. Nisa Bostancı, Ataberk Olgun, A. Giray
+Yağlıkçı, and Onur Mutlu. 2024. Ramulator 2.0: A Modern, Modular, and Extensi-
+ble DRAM Simulator. IEEE Computer Architecture Letters 23, 1 (2024), 112–116.
+https://doi.org/10.1109/LCA.2023.3333759
+[35] Xinyin Ma, Gongfan Fang, and Xinchao Wang. 2024. DeepCache: Accelerating
+Diffusion Models for Free. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR). 15762–15772.
+[36] Xin Ma, Yaohui Wang, Xinyuan Chen, Gengyun Jia, Ziwei Liu, Yuan-Fang Li,
+Cunjian Chen, and Yu Qiao. 2025. Latte: Latent Diffusion Transformer for Video
+Generation. Transactions on Machine Learning Research (2025).
+[37] OpenAI. 2021. Triton: An Open-Source GPU Programming Language. https:
+//github.com/openai/triton. Accessed: 2026-03-06.
+[38] I. Pavlov, A. Ivanov, and S. Stafievskiy. 2023. Text-to-Image Benchmark: A
+benchmark for generative models. https://github.com/boomb0om/text2image-
+benchmark. Version 0.1.0.
+[39] William Peebles and Saining Xie. 2023. Scalable Diffusion Models with Trans-
+formers. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV). 4195–4205.
+[40] Yifan Peng, Shankai Yan, and Zhiyong Lu. 2019. Transfer Learning in Biomedical
+Natural Language Processing: An Evaluation of BERT and ELMo on Ten Bench-
+marking Datasets. arXiv:1906.05474 [cs.CL] https://arxiv.org/abs/1906.05474
+[41] Dustin Podell, Zion English, Kyle Lacey, Andreas Blattmann, Tim Dockhorn,
+Jonas Müller, Joe Penna, and Robin Rombach. 2023. SDXL: Improving Latent
+Diffusion Models for High-Resolution Image Synthesis. arXiv:2307.01952 [cs.CV]
+https://arxiv.org/abs/2307.01952
+[42] Yubin Qin, Yang Wang, Dazheng Deng, Zhiren Zhao, Xiaolong Yang, Leibo Liu,
+Shaojun Wei, Yang Hu, and Shouyi Yin. 2023. Fact: Ffn-attention co-optimized
+transformer architecture with eager correlation prediction. In Proceedings of the
+50th Annual International Symposium on Computer Architecture. 1–14.
+[43] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh,
+Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark,
+Gretchen Krueger, and Ilya Sutskever. 2021.
+Learning Transferable Visual
+Models From Natural Language Supervision. In Proceedings of the 38th Inter-
+national Conference on Machine Learning (Proceedings of Machine Learning
+Research, Vol. 139), Marina Meila and Tong Zhang (Eds.). PMLR, 8748–8763.
+https://proceedings.mlr.press/v139/radford21a.html
+[44] Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang,
+Michael Matena, Yanqi Zhou, Wei Li, and Peter J. Liu. 2020. Exploring the Limits
+of Transfer Learning with a Unified Text-to-Text Transformer. Journal of Machine
+Learning Research 21, 140 (2020), 1–67. http://jmlr.org/papers/v21/20-074.html
+[45] Akshat Ramachandran, Souvik Kundu, and Tushar Krishna. 2025. MicroScopiQ:
+Accelerating Foundational Models through Outlier-Aware Microscaling Quanti-
+zation. arXiv:2411.05282 [cs.AR] https://arxiv.org/abs/2411.05282
+[46] Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn
+Ommer. 2022. High-Resolution Image Synthesis With Latent Diffusion Models. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). 10684–10695.
+[47] Tim Salimans and Jonathan Ho. 2022. Progressive Distillation for Fast Sampling
+of Diffusion Models. arXiv:2202.00512 [cs.LG] https://arxiv.org/abs/2202.00512
+[48] Satyabrata Sarangi and Bevan Baas. 2021. DeepScaleTool: A Tool for the Accurate
+Estimation of Technology Scaling in the Deep-Submicron Era. In 2021 IEEE
+International Symposium on Circuits and Systems (ISCAS). 1–5. https://doi.org/
+10.1109/ISCAS51556.2021.9401196
+[49] Team SimPy. 2025. SimPy: Discrete-event simulation for Python. https://github.
+com/SimPy/SimPy. Accessed: 2025-08-20.
+[50] Jiaming Song, Chenlin Meng, and Stefano Ermon. 2022. Denoising Diffusion
+Implicit Models. arXiv:2010.02502 [cs.LG] https://arxiv.org/abs/2010.02502
+[51] James E. Stine, Ivan Castellanos, Michael Wood, Jeff Henson, Fred Love, W. Rhett
+Davis, Paul D. Franzon, Michael Bucher, Sunil Basavarajaiah, Julie Oh, and Ravi
+Jenkal. 2007. FreePDK: An Open-Source Variation-Aware Design Kit. In 2007 IEEE
+International Conference on Microelectronic Systems Education (MSE’07). 173–174.
+https://doi.org/10.1109/MSE.2007.44
+[52] Desen Sun, Henry Tian, Tim Lu, and Sihang Liu. 2024. FlexCache: Flexible
+Approximate Cache System for Video Diffusion.
+arXiv:2501.04012 [cs.MM]
+https://arxiv.org/abs/2501.04012
+[53] Desen Sun, Zepeng Zhao, and Yuke Wang. 2025. PATCHEDSERVE: A Patch Man-
+agement Framework for SLO-Optimized Hybrid Resolution Diffusion Serving.
+arXiv:2501.09253 [cs.DC] https://arxiv.org/abs/2501.09253
+[54] Patrick von Platen, Suraj Patil, Anton Lozhkov, Pedro Cuenca, Nathan Lambert,
+Kashif Rasul, Mishig Davaadorj, Dhruv Nair, Sayak Paul, William Berman, Yiyi
+Xu, Steven Liu, and Thomas Wolf. 2022. Diffusers: State-of-the-art diffusion
+models. https://github.com/huggingface/diffusers.
+[55] Huizheng Wang, Jiahao Fang, Xinru Tang, Zhiheng Yue, Jinxi Li, Yubin Qin, Sihan
+Guan, Qinze Yang, Yang Wang, Chao Li, Yang Hu, and Shouyi Yin. 2024. SOFA: A
+Compute-Memory Optimized Sparsity Accelerator via Cross-Stage Coordinated
+Tiling. In 2024 57th IEEE/ACM International Symposium on Microarchitecture
+(MICRO). 1247–1263. https://doi.org/10.1109/MICRO61859.2024.00093
+[56] Yu Emma Wang, Gu-Yeon Wei, and David Brooks. 2019. Benchmarking TPU,
+GPU, and CPU Platforms for Deep Learning. arXiv:1907.10701 [cs.LG] https:
+//arxiv.org/abs/1907.10701
+[57] Yuchen Xia, Divyam Sharma, Yichao Yuan, Souvik Kundu, and Nishil Talati. 2025.
+MoDM: Efficient Serving for Image Generation via Mixture-of-Diffusion Models.
+arXiv:2503.11972 [cs.DC] https://arxiv.org/abs/2503.11972
+[58] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike
+Lewis. 2024.
+Efficient Streaming Language Models with Attention Sinks.
+arXiv:2309.17453 [cs.CL] https://arxiv.org/abs/2309.17453
+[59] Chenhao Xue, Chen Zhang, Xun Jiang, Zhutianya Gao, Yibo Lin, and Guangyu
+Sun. 2024. Oltron: Algorithm-Hardware Co-design for Outlier-Aware Quanti-
+zation of LLMs with Inter-/Intra-Layer Adaptation. In Proceedings of the 61st
+ACM/IEEE Design Automation Conference (San Francisco, CA, USA) (DAC ’24).
+Association for Computing Machinery, New York, NY, USA, Article 31, 6 pages.
+https://doi.org/10.1145/3649329.3656221
+[60] Zhihang Yuan, Hanling Zhang, Pu Lu, Xuefei Ning, Linfeng Zhang, Tianchen
+Zhao, Shengen Yan, Guohao Dai, and Yu Wang. 2024.
+DiTFastAttn: Atten-
+tion Compression for Diffusion Transformer Models. In Advances in Neu-
+ral Information Processing Systems, A. Globerson, L. Mackey, D. Belgrave,
+A. Fan, U. Paquet, J. Tomczak, and C. Zhang (Eds.), Vol. 37. Curran Associates,
+Inc., 1196–1219.
+https://proceedings.neurips.cc/paper_files/paper/2024/file/
+0267925e3c276e79189251585b4100bf-Paper-Conference.pdf
+[61] Jintao Zhang, Chendong Xiang, Haofeng Huang, Jia Wei, Haocheng Xi, Jun Zhu,
+and Jianfei Chen. 2025. SpargeAttention: Accurate and Training-free Sparse
+Attention Accelerating Any Model Inference. arXiv:2502.18137 [cs.LG] https:
+//arxiv.org/abs/2502.18137
+14
+
+DSTAR: Accelerating Diffusion Transformers via Spatial and Temporal Redundancy Reduction
+MICRO 2026, October 31–November 04, 2026, Athens, Greece
+[62] Zihan Zou, Xinming Yan, Shun Zhang, Peng Zheng, Guang Yang, Hao Cai, and
+Bo Liu. 2025.
+S-DMA: Sparse Diffusion Models Acceleration via Spatiality-
+Aware Prediction and Dimension-Adaptive Dataflow. In Proceedings of the 58th
+IEEE/ACM International Symposium on Microarchitecture (MICRO ’25). Association
+for Computing Machinery, New York, NY, USA, 432–444.
+https://doi.org/10.
+1145/3725843.3756046
+15
